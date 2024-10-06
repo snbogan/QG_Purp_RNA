@@ -1,0 +1,32 @@
+#!/bin/bash
+#SBATCH --job-name=featureCounts_R1
+#SBATCH --ntasks=1 #Number of tasks (processes) to be launched
+#SBATCH --cpus-per-task=1 #Number of CPUs per task
+#SBATCH --mem=16G # Memory allocation
+#SBATCH -t 12:00:00
+#SBATCH --mail-type=START,END,FAIL
+#SBATCH --mail-user=snbogan@ucsb.edu
+
+# Set the path to your input .bam files
+BAM_DIR="/home/snbogan/Cross_pHox/hisat2_alignments/to_count"
+
+# Set the path to your output directory
+OUTPUT_DIR="/home/snbogan/Cross_pHox/featureCounts"
+
+# Set the path to the annotation file in GTF format
+ANNOTATION="/home/snbogan/Cross_pHox/Genome/sp5_0_GCF.gtf"
+
+# Run featureCounts for each .bam file
+for bam_file in ${BAM_DIR}/*.bam; do
+    # Extract the filename without extension
+    filename=$(basename "$bam_file")
+    sample_name="${filename%.*}"
+
+    # Run featureCounts
+    featureCounts \
+        -a $ANNOTATION \
+        -o ${OUTPUT_DIR}/${sample_name}_counts.txt \
+	-g transcript_id \
+        $bam_file
+done
+

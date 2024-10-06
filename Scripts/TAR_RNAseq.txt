@@ -1,0 +1,13 @@
+#!/bin/bash
+#SBATCH --job-name=tar_directory
+#SBATCH --ntasks=1 #Number of tasks (processes) to be launched
+#SBATCH --cpus-per-task=4 #Number of CPUs per task
+#SBATCH --mem=16G # Memory allocation
+#SBATCH -t 24:00:00
+#SBATCH --mail-type=START,END,FAIL
+#SBATCH --mail-user=snbogan@ucsb.edu
+
+# Go to working directory
+cd /home/snbogan/Cross_pHox/
+
+# tar -czvf archive_CP_RNAseq_Sept2023.tar.gz ./*

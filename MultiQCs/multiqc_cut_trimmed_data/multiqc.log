@@ -1,0 +1,21 @@
+[2023-06-15 16:01:53,165] multiqc                                            [DEBUG  ]  This is MultiQC v1.14
+[2023-06-15 16:01:53,167] multiqc                                            [DEBUG  ]  Command used: /home/snbogan/miniconda3/envs/GVA-multiqc/bin/multiqc fastQC_trimmed/ -o fastQC_trimmed/cut_trimmed_multiQC --filename multiqc_cut_trimmed.html --title Cut trimmed  MultiQC Report
+[2023-06-15 16:01:53,431] multiqc                                            [DEBUG  ]  Latest MultiQC version is v1.14
+[2023-06-15 16:01:53,432] multiqc                                            [DEBUG  ]  Working dir : /home/snbogan/Cross_pHox/CutAdapt_fastqs
+[2023-06-15 16:01:53,432] multiqc                                            [DEBUG  ]  Template    : default
+[2023-06-15 16:01:53,432] multiqc                                            [DEBUG  ]  Running Python 3.11.4 | packaged by conda-forge | (main, Jun 10 2023, 18:08:17) [GCC 12.2.0]
+[2023-06-15 16:01:53,432] multiqc                                            [INFO   ]  Report title: Cut trimmed  MultiQC Report
+[2023-06-15 16:01:53,433] multiqc                                            [DEBUG  ]  Analysing modules: custom_content, ccs, ngsderive, purple, conpair, lima, peddy, somalier, methylQA, mosdepth, phantompeakqualtools, qualimap, preseq, hifiasm, quast, qorts, rna_seqc, rockhopper, rsem, rseqc, busco, bustools, goleft_indexcov, gffcompare, disambiguate, supernova, deeptools, sargasso, verifybamid, mirtrace, happy, mirtop, sambamba, gopeaks, homer, hops, macs2, theta2, snpeff, gatk, htseq, bcftools, featureCounts, fgbio, dragen, dragen_fastqc, dedup, pbmarkdup, damageprofiler, biobambam2, jcvi, mtnucratio, picard, vep, sentieon, prokka, qc3C, nanostat, samblaster, samtools, sexdeterrmine, eigenstratdatabasetools, bamtools, jellyfish, vcftools, longranger, stacks, varscan2, snippy, umitools, bbmap, bismark, biscuit, diamond, hicexplorer, hicup, hicpro, salmon, kallisto, slamdunk, star, hisat2, tophat, bowtie2, bowtie1, cellranger, snpsplit, odgi, pangolin, nextclade, humid, kat, leehom, adapterRemoval, bbduk, clipandmerge, cutadapt, flexbar, kaiju, kraken, malt, motus, trimmomatic, sickle, skewer, sortmerna, biobloomtools, fastq_screen, afterqc, fastp, fastqc, filtlong, prinseqplusplus, pychopper, porechop, pycoqc, minionqc, anglerfish, multivcfanalyzer, clusterflow, checkqc, bcl2fastq, bclconvert, interop, ivar, flash, seqyclean, optitype, whatshap
+[2023-06-15 16:01:53,433] multiqc                                            [DEBUG  ]  Using temporary directory for creating report: /tmp/tmpc3j99nfn
+[2023-06-15 16:01:53,602] multiqc                                            [INFO   ]  Search path : /home/snbogan/Cross_pHox/CutAdapt_fastqs/fastQC_trimmed
+[2023-06-15 16:03:08,694] multiqc                                            [DEBUG  ]  Summary of files that were skipped by the search: [skipped_module_specific_max_filesize: 1760] // [skipped_no_match: 160]
+[2023-06-15 16:03:12,937] multiqc.plots.bargraph                             [DEBUG  ]  Using matplotlib version 3.7.1
+[2023-06-15 16:03:12,943] multiqc.plots.linegraph                            [DEBUG  ]  Using matplotlib version 3.7.1
+[2023-06-15 16:03:12,946] multiqc                                            [DEBUG  ]  No samples found: custom_content
+[2023-06-15 16:03:38,562] multiqc.modules.fastqc.fastqc                      [INFO   ]  Found 160 reports
+[2023-06-15 16:04:08,529] multiqc                                            [INFO   ]  Compressing plot data
+[2023-06-15 16:04:08,561] multiqc                                            [INFO   ]  Report      : fastQC_trimmed/cut_trimmed_multiQC/multiqc_cut_trimmed.html
+[2023-06-15 16:04:08,561] multiqc                                            [INFO   ]  Data        : fastQC_trimmed/cut_trimmed_multiQC/multiqc_cut_trimmed_data
+[2023-06-15 16:04:08,561] multiqc                                            [DEBUG  ]  Moving data file from '/tmp/tmpc3j99nfn/multiqc_data' to 'fastQC_trimmed/cut_trimmed_multiQC/multiqc_cut_trimmed_data'
+[2023-06-15 16:04:08,875] multiqc                                            [INFO   ]  MultiQC complete
+[2023-06-15 16:04:08,876] multiqc                                            [WARNING]  9 flat-image plots used in the report due to large sample numbers

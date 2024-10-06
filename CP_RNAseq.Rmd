@@ -1,0 +1,4107 @@
+---
+title: "CP_RNAseq"
+output: html_document
+date: "2023-06-27"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_knit$set(root.dir = '~/Documents/GitHub/Cross_pHox/')
+
+# Load dependencies
+
+library(edgeR)
+library(DESeq2)
+library(tidyverse)
+library(arrayQualityMetrics)
+library(pheatmap)
+library(ape)
+library(vegan)
+library(reshape2)
+library(Rmisc)
+library(mediation)
+library(ggforce)
+library(ggpubr)
+library(lme4)
+library(nadiv)
+library(Matrix)
+library(lme4qtl)
+library(brms)
+library(bayestestR)
+library(ggExtra)
+library(GenomicRanges)
+library(lmtest)
+
+```
+
+# Tests of differential expression induced by developmental and transgenerational upwelling
+
+```{r}
+
+# Read in and wrangle featureCounts output
+featureCounts_df <- read.table("comb_featureCounts.txt")
+colnames(featureCounts_df) <- featureCounts_df[1,]
+featureCounts_df <- featureCounts_df[-1, ] 
+
+# Make gene id matrix rowname
+row.names(featureCounts_df) <- featureCounts_df$Geneid
+
+# Remove unnecessary columns
+featureCounts_df <- subset(featureCounts_df,
+                           select = -c(Geneid))
+
+# Simplify column names
+colnames(featureCounts_df) <- gsub("_RNA_.*", "",
+                                   gsub("/home/snbogan/Cross_pHox/hisat2_alignments/to_count/",
+                                        "", colnames(featureCounts_df)))
+
+# Remove outliers
+featureCounts_df <- featureCounts_df[, !(colnames(featureCounts_df) %in% 
+                                           c("U33_U1", "U34_U1"))]
+
+# Create parental treatment variable
+Par = as.vector(sapply(colnames(featureCounts_df), 
+                       function(col) substr(col, 1, 1)))
+
+# Create developmental treatment variable
+Dev = as.vector(gsub(".*_", "",
+                     gsub("[0-9]", "", 
+                          colnames(featureCounts_df))))
+
+# Create dam variable
+parts <- gsub("_.*", "", colnames(featureCounts_df))
+
+# Extract the first number
+first_number <- as.numeric(gsub("[^0-9]", "", parts))
+
+# Set Dam and Sire objects
+split_numbers <- function(numbers) {
+  first_digits <- vector("numeric", length(numbers))
+  second_digits <- vector("numeric", length(numbers))
+  
+  for (i in 1:length(numbers)) {
+    number <- as.character(numbers[i])
+    
+    if (nchar(number) %% 2 == 0) {
+      first_digits[i] <- as.numeric(substr(number, 1, nchar(number) / 2))
+      second_digits[i] <- as.numeric(substr(number, nchar(number) / 2 + 1, nchar(number)))
+    } else {
+      first_digits[i] <- as.numeric(substr(number, 1, (nchar(number) + 1) / 2 - 1))
+      second_digits[i] <- as.numeric(substr(number, (nchar(number) + 1) / 2, nchar(number)))
+    }
+  }
+  
+  return(list(first_digits = first_digits, second_digits = second_digits))
+}
+
+# Example usage
+split_result <- split_numbers(first_number)
+
+Dam = split_result$first_digits
+
+# Create sire variable
+Sire = split_result$second_digits
+
+# Create df of predictor variables
+targets_gc <- data.frame(Par = Par,
+                         Dev = Dev,
+                         Dam = Dam,
+                         Sire = Sire)
+
+targets_gc$grouping <- paste( targets_gc$Par, 
+                             targets_gc$Dev,
+                             sep="_" )
+
+# Round counts (if necessary) for use in edgeR
+data_input_gc <- sapply(featureCounts_df,as.numeric)
+
+row.names(data_input_gc) <- row.names(featureCounts_df)
+
+data_input_gc <- as.data.frame(round(data_input_gc))
+
+# Make DGElist
+DGEList <- DGEList(counts = data_input_gc, 
+                   group = targets_gc$grouping, 
+                  remove.zeros = T)
+
+# Let's remove genes with less then 0.5 cpm (this is ~10 counts in the count file) in no fewer then 9 samples
+DGEList_keep <- rowSums(cpm(DGEList) > 0.5) >= 60
+
+# How many genes are removed by read count filter?
+table(DGEList_keep)
+
+# Filter and set keep.lib.sizes = F to have R recalculate library sizes after filtering
+DGEList <- DGEList[DGEList_keep, 
+                   keep.lib.sizes = FALSE]
+
+# Create library size normalization factors
+DGEList <- calcNormFactors(DGEList)
+
+
+# CPM conversion and log^2 transformation of read counts
+DGEList_log <- cpm(DGEList,
+                   log = TRUE, 
+                   prior.count = 2)
+
+# MDS of normalized gene read counts
+MDS <- plotMDS(DGEList_log)
+
+# Print MDS plot
+MDS
+
+```
+
+# Create PCoA's of gene expression
+
+```{r}
+
+#PCA
+# Export pcoa loadings
+dds.pcoa = pcoa(vegdist(t(DGEList_log),
+                          method = "euclidean") / 1000)
+
+# Create df of MDS vector loading
+scores <- dds.pcoa$vectors
+
+## Plot pcoa loadings of each sample, groouped by time point and pCO2 treatment
+
+# Calculate % variation explained by each eigenvector
+percent <- dds.pcoa$values$Eigenvalues
+cumulative_percent_variance <- (percent / sum( percent)) * 100
+
+# Prepare information for pcoa plot, then plot
+
+color <- c("#440154FF",
+         "#33638DFF",
+         "#3CBB75FF",
+         "#FDE725FF")
+         
+par(mfrow = c(1, 1))
+
+plot(
+  scores[, 1],
+  scores[, 2],
+  cex = .5,
+  cex.axis = 1,
+  cex.lab = 1.25,
+  xlab = paste("PC1, ", round(cumulative_percent_variance[1], 2), "%"),
+  ylab = paste("PC2, ", round(cumulative_percent_variance[2], 2), "%")
+  )
+
+# Add visual groupings to pcoa plot
+ordihull(
+  scores,
+  as.factor(targets_gc$grouping),
+  border = NULL,
+  lty = 2,
+  lwd = .5,
+  label = F,
+  col = color,
+  draw = "polygon",
+  alpha = 100,
+  cex = .5
+  )
+
+ordispider(scores, as.factor(targets_gc$grouping), 
+           label = T, col = color, ) # Vectors connecting samples in same pCO2 x time group
+
+N_N <- as.data.frame(scores)[targets_gc$grouping == "N_N", ][chull(as.data.frame(scores)[targets_gc$grouping == 
+    "N_N", c("Axis.1", "Axis.2")]), ]  # hull values for grp N_N
+
+N_U <- as.data.frame(scores)[targets_gc$grouping == "N_U", ][chull(as.data.frame(scores)[targets_gc$grouping == 
+    "N_U", c("Axis.1", "Axis.2")]), ]  # hull values for grp N_U
+
+U_N <- as.data.frame(scores)[targets_gc$grouping == "U_N", ][chull(as.data.frame(scores)[targets_gc$grouping == 
+    "U_N", c("Axis.1", "Axis.2")]), ]  # hull values for grp U_N
+
+U_U <- as.data.frame(scores)[targets_gc$grouping == "U_U", ][chull(as.data.frame(scores)[targets_gc$grouping == 
+    "U_U", c("Axis.1", "Axis.2")]), ]  # hull values for grp U_U
+
+N_N$Group <- "N_N"
+N_U$Group <- "N_U"
+U_N$Group <- "U_N"
+U_U$Group <- "U_U"
+
+hull.data <- rbind(N_N, N_U, U_N, U_U)  #combine groups
+hull.data$Par <- gsub("_.*", "", hull.data$Group)
+
+scores_df <- as.data.frame(scores)
+scores_df$Sibship <- gsub("_.*", "", row.names(scores_df))
+scores_df$Par <- as.vector(sapply(scores_df$Sibship, 
+                       function(col) substr(col, 1, 1)))
+
+scores_df$Par <- as.vector(sapply(row.names(scores_df), 
+                       function(col) substr(col, 1, 1)))
+
+scores_df$Par <- ifelse(scores_df$Par == "N", "Parental non-upwelling", "Parental upwelling")
+
+hull.data$Par <- ifelse(hull.data$Par  == "N", "Parental non-upwelling", "Parental upwelling")
+
+Fig2A <- ggplot(data = scores_df, 
+                aes(x = Axis.1, y = Axis.2)) +
+  geom_polygon(data=hull.data, aes(x = Axis.1, y = Axis.2, fill = Group),
+               alpha=0.33) + # add the convex hulls
+  geom_bspline(data = filter(scores_df, row.names(scores_df) != 
+                               c("U33_N1", "U34_N1")),
+               aes(group = Sibship,
+                   alpha = stat(index), size = after_stat(index)), 
+               type = "clamped", color = "black") +
+  geom_point(aes(color = targets_gc$grouping,
+                 shape = targets_gc$grouping), size = 2, alpha = 1) +
+  scale_color_viridis_d() +
+  scale_fill_viridis_d(guide = "none") +
+  theme_classic(base_size = 20, base_rect_size = 0) +
+  facet_wrap(~Par) +
+  scale_shape_manual(values = c(NA,16,NA,16), guide = "none") +
+  scale_size_continuous(range = c(0,1), guide = "none") +
+  scale_alpha_continuous(range = c(0.1,.5), guide = "none") +
+  labs(x = "PC1, 14.48%", y = "PC2, 9.22%", color = "Treatment")
+
+Fig2A 
+
+label_list <- list('N'="Parental Non-upwelling",
+  'U'="Parental Upwelling")
+
+treat_labeller <- function(variable,value){
+  return(label_list[value])
+}
+
+ggplot(survey,aes(x=age)) + stat_bin(aes(n=nrow(h3),y=..count../n), binwidth=10) + 
+  facet_grid(hospital ~ ., labeller=hospital_labeller)
+
+targets_gc$Dev_long <- ifelse(targets_gc$Dev == "N", 
+                              "Non-upwelling", 
+                              "Upwelling")
+
+Fig2_post <- ggplot(data = scores_df, 
+                aes(x = Axis.1, y = Axis.2)) +
+  geom_polygon(data=hull.data, aes(x = Axis.1, y = Axis.2, 
+                                   fill = gsub(".*_", "", Group)),
+               alpha=0.33) + # add the convex hulls
+  geom_bspline(data = filter(scores_df, row.names(scores_df) != 
+                               c("U33_N1", "U34_N1")),
+               aes(group = Sibship,
+                   alpha = stat(index), size = after_stat(index)), 
+               type = "clamped", color = "black") +
+  geom_point(aes(color = targets_gc$Dev_long,
+                 shape = targets_gc$grouping), size = 3, alpha = 1) +
+  scale_color_viridis_d(begin = 0, end = 0.9) +
+  scale_fill_viridis_d(begin = 0, end = 0.9, guide = "none") +
+  theme_classic(base_size = 25, base_rect_size = 0) +
+  theme(legend.background = element_rect(fill = "transparent"),
+        panel.background = element_rect(fill = "transparent"),
+        strip.background = element_rect(fill = "transparent"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        plot.background = element_rect(fill = "transparent", color = NA),
+        legend.position = "right", 
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 12)) +
+  facet_grid(. ~ Par, labeller=treat_labeller) +
+  scale_shape_manual(values = c(NA,16,NA,16), guide = "none") +
+  scale_size_continuous(range = c(0,1), guide = "none") +
+  scale_alpha_continuous(range = c(0.1,.5), guide = "none") +
+  labs(x = "PC1, 14.48%", y = "PC2, 9.22%", color = "Dev. treatment")
+
+Fig2_post
+
+ggsave(Fig2_post,
+       units = "in", width = 12, height = 6, 
+       filename = "~/Documents/GitHub/Cross_pHox/Fig2_post.png",
+       bg = "transparent")
+
+ggsave(Fig2_post,
+       units = "in", width = 12, height = 6, 
+       filename = "~/Documents/GitHub/Cross_pHox/Fig2_post.png",
+       bg = "transparent")
+
+```
+
+#Outlier detection
+
+```{r}
+# 
+# # Create DESeq2 object required for arrayqualitymetrics
+# counts_df <- as.data.frame(gene_counts_matrix)
+# 
+# dds <- DESeqDataSetFromMatrix(counts_df,
+#                               colData = targets_gc,
+#                               design = formula(~ 1 + Par + Dev))
+# 
+# # Filter DESeq object
+# dds_keep <- rowSums(cpm(dds) > 0.5) >= 60
+# dds <- dds[dds_keep]
+# 
+# # Outlier tests
+# vsd <- varianceStabilizingTransformation(dds, blind=TRUE)
+# 
+# e <- ExpressionSet(assay(vsd), AnnotatedDataFrame(as.data.frame(colData(vsd))))
+# 
+# arrayQualityMetrics(e, intgroup=c("Par","Dev"), force=T)
+
+```
+
+```{r}
+# Export DGEList_keep
+save(DGEList_keep,
+     file = "DGEList_keep.Rdata")
+
+```
+
+```{r}
+
+# Create model design that includes maternal and developmental effects and set intercept to 0
+design_multi_gc <- model.matrix(~0 + Par + Dev)
+
+# Filter and normalize count matrix input
+gene_counts_matrix <- as.matrix(data_input_gc)
+
+DGEList <- DGEList(counts = gene_counts_matrix, 
+                   group = targets_gc$grouping, 
+                   remove.zeros = T)
+
+DGEList <- DGEList[DGEList_keep, 
+                   keep.lib.sizes = FALSE]
+
+DGEList <- calcNormFactors(DGEList)
+
+# Estmate mean dispersal for use in plotting common dispersal against tagwise dispersal
+DGEList <- estimateGLMCommonDisp(DGEList, 
+                                 design_multi_gc)
+
+DGEList$common.dispersion
+
+# Estmate robust, Bayesian dispersal per gene for estimating regression parameters for glmQL and differential expression
+DGEList <- estimateGLMRobustDisp(DGEList, 
+                                 design_multi_gc) 
+
+# Plot tagwise dispersal and impose w/mean dispersal and trendline
+plotBCV(DGEList) 
+
+# Fit a robust, multifactorial quasi-likelihood glm to normalized read counts
+fit_gc <- glmQLFit(DGEList, 
+                   design_multi_gc, 
+                   robust = TRUE)
+
+# Plot shrinkage of Bayesian quasi-likelihood dispersion to visualize stastical power of DE analysis
+plotQLDisp(fit_gc) # High shrinkage / high statistical power across DE tests
+
+```
+
+```{r}
+
+## Pairwise comparison of parental differential expression
+
+# Design contrast between samples based on maternal effect
+#colnames(design_multi_gc) <- c("ParN", "ParU", "DevU", ""ParU_DevU")
+con_Parent <- makeContrasts(con_Par_cons = ParU - ParN,
+                            levels = design_multi_gc)
+
+# Apply quasi-likelihood F test to incorporate Bayesian tagwise dispersion estimates as parameter for DEG analysis
+parental_QLFT <- glmQLFTest(fit_gc, 
+                            contrast = con_Parent)
+
+# Plot maternal logFC across logCPM (fdr < 0.05)
+plotMD(parental_QLFT)
+
+# How many significant DEGs? 2405
+summary(decideTestsDGE(parental_QLFT, 
+                       adjust.method = "fdr",
+                       p.value = 0.05))
+
+summary(decideTestsDGE(parental_QLFT, 
+                       adjust.method = "fdr",
+                       p.value = 0.05,
+                       lfc = 1))
+
+# Filter for significance and logFC cutoff (doubling of fold change or logFC of 1)
+parental_QLFT_cutoff <- topTags(parental_QLFT, 
+                                n = (1539 + 1582), 
+                                adjust.method = "fdr",
+                                p.value = 0.05)
+
+# Create df of logFC and sign cutoff DEGs
+parental_QLFT_cutoff_df <- data.frame(parental_QLFT_cutoff$table)
+parental_QLFT_fc_cutoff_df <- parental_QLFT_cutoff_df[!(abs( parental_QLFT_cutoff_df$logFC) < 1),]
+
+# Count total DEGs with logFC cutoff
+nrow(parental_QLFT_cutoff_df) # Without logFC cutoff = 3027 DEGs
+nrow(parental_QLFT_fc_cutoff_df) # With logFC cutoff = 79 DEGs
+
+```
+
+```{r}
+
+## Pairwise comparison of developmental differential expression
+
+# Pairwise comparison of developmental differential expression
+con_Dev <- makeContrasts(con_Dev_cons = DevU, 
+                         levels = design_multi_gc)
+
+# Apply quasi-likelihood F test to incorporate Bayesian tagwise dispersion estimates as parameter for DEG analysis
+dev_QLFT <- glmQLFTest(fit_gc,
+                       contrast = con_Dev)
+
+# Plot maternal logFC across logCPM (fdr < 0.05)
+plotMD( dev_QLFT )
+
+# How many significant DEGs? 4722
+summary(decideTestsDGE( dev_QLFT, 
+                         adjust.method = "fdr",
+                         p.value = 0.05))
+
+summary(decideTestsDGE(dev_QLFT, 
+                       adjust.method = "fdr",
+                       p.value = 0.05,
+                       lfc = 1.0))
+
+# Filter for significance and logFC cutoff
+dev_QLFT_cutoff <- topTags(dev_QLFT, 
+                                n = (2205 + 2246), 
+                                adjust.method = "fdr",
+                                p.value = 0.05)
+
+# Create df of logFC and sig cutoff DEGs (doubling of fold change or logFC of 1)
+dev_QLFT_cutoff_df <- data.frame( dev_QLFT_cutoff$table )
+dev_QLFT_fc_cutoff_df <- dev_QLFT_cutoff_df[ !( abs( dev_QLFT_cutoff_df$logFC ) < 1 ), ]
+
+# Count total DEGs with logFC cutoff
+nrow(dev_QLFT_cutoff_df) # Without logFC cutoff = 4451 DEGs
+nrow(dev_QLFT_fc_cutoff_df) # With logFC cutoff = 222 DEGs
+
+# How many DEGs were shared between parental and dev. effects?
+count(row.names(parental_QLFT_cutoff_df) %in% 
+       row.names(dev_QLFT_cutoff_df))# / 
+  #nrow(parental_QLFT_cutoff_df)
+
+## Make Fig2B (MD plot)
+# Create plotting df
+dev_QLFT$table$Effect <- "Developmental"
+parental_QLFT$table$Effect <- "Transgenerational"
+
+dev_QLFT$table$FDR <- p.adjust(dev_QLFT$table$PValue, method = "fdr")
+parental_QLFT$table$FDR <- p.adjust(parental_QLFT$table$PValue, method = "fdr")
+
+QLFT <- rbind(dev_QLFT$table, parental_QLFT$table)
+QLFT$Dir <- ifelse(QLFT$logFC > 0 & QLFT$FDR < 0.05, "Up", 
+                             ifelse(QLFT$logFC < 0 & QLFT$FDR < 0.05,
+                                    "Down", "None"))
+
+QLFT$Effect = factor(
+  QLFT$Effect,
+  levels=c('Transgenerational','Developmental'))
+
+QLFT$Dir = factor(
+  QLFT$Dir,
+  levels=c('Down','Up', 'None'))
+
+Fig2B <- ggplot(data = QLFT,
+                aes(x = logCPM, y = logFC, size = Dir, color = Dir)) +
+  geom_point() +
+  scale_size_manual(values = c(1, 1, .1), guide = "none") +
+  scale_color_manual(values = c("blue", "red", "black"), guide = "none") +
+  facet_grid(Effect~.) +
+  theme_classic(base_rect_size = 0, base_size = 20)
+
+Fig2B
+
+# Compile Fig 2
+Fig2 <- ggarrange(Fig2A, Fig2B, 
+                   labels = c("A", "B"),
+                   heights = c(1, 1),
+                   widths = c(1, .5),
+                   ncol = 2, nrow = 1, align = "hv")
+
+Fig2
+
+# Export Fig 5 as png
+png("~/Documents/GitHub/Cross_pHox/Fig2.png", units = "in", width = 12, 
+    height = 7, 
+    res = 600)
+
+Fig2
+
+```
+
+#Tests of transcriptional plasticity's adaptiveness
+
+```{r}
+
+# Create cpm df for regression against survival/morph data
+logCPM_df <- as.data.frame(DGEList_log)
+
+# Create tabularized df containing all replicates using 'melt'
+logCPM_df$geneid <- row.names(logCPM_df)
+
+tab_exp_df <- melt(logCPM_df,
+                   id = c("geneid"))
+
+# Add covariate information
+# Create parental treatment variable
+tab_exp_df$Par <- as.vector(sapply(tab_exp_df$variable, 
+                       function(col) substr(col, 1, 1)))
+
+# Create developmental treatment variable
+tab_exp_df$Dev <- as.vector(gsub(".*_", "",
+                     gsub("[0-9]", "", 
+                          tab_exp_df$variable)))
+
+# Add abnormality data
+abnorm_df <- read.csv("Fitness_Data/Perc_Abnormality.csv")
+abnorm_df$variable <- gsub("\\.", "", abnorm_df$variable)
+
+tab_exp_df <- merge(tab_exp_df,
+                    abnorm_df,
+                    by = "variable")
+
+## Add morph data
+morph_parU <- read.table("Fitness_Data/data_parU.txt")
+morph_parN <- read.table("Fitness_Data/data_parN.txt")
+
+colnames(morph_parU) <- morph_parU[1,]
+morph_parU <- morph_parU[-1, ]
+
+colnames(morph_parN) <- morph_parN[1,]
+morph_parN <- morph_parN[-1, ]
+
+morph_df <- rbind(morph_parU, morph_parN)
+morph_df$Length.spi <- as.numeric(morph_df$Length.spi)
+morph_df$Length.bod <- as.numeric(morph_df$Length.bod)
+
+# Calc mean morph values
+spi_sum <- summarySE(measurevar = "Length.spi",
+                     groupvars = "cultureFac",
+                     data = morph_df)
+
+bod_sum <- summarySE(measurevar = "Length.bod",
+                     groupvars = "cultureFac",
+                     data = morph_df)
+
+morph_sum <- data.frame(variable = spi_sum$cultureFac,
+                        Length.spi = spi_sum$Length.spi,
+                        Length.bod = bod_sum$Length.bod)
+
+tab_morph_df <- merge(tab_exp_df,
+                    data.frame(variable = gsub("\\.", "", morph_sum$variable),
+                               Length_spi = morph_sum$Length.spi,
+                               Length_bod = morph_sum$Length.bod),
+                    by = "variable")
+
+# Reverse log^2 read count transformation
+tab_exp_df$CPM <- 2^tab_exp_df$value
+tab_morph_df$CPM <- 2^tab_morph_df$value
+
+```
+
+Estimate adaptiveness of plasticity in body size, spicule length
+
+```{r}
+
+# Wrangle phenotype data for selection gradient estimation
+colnames(abnorm_df) <- c("cultureFac", "percAb")
+morph_df$cultureFac <- gsub("\\.", "", morph_df$cultureFac)
+morph_df$Spi_norm <- morph_df$Length.spi / morph_df$Length.bod
+
+# Calculate mean spicule length and body length
+remove_last_digit <- function(strings) {
+  if (is.character(strings)) {
+    without_last_digit <- substr(strings, 1, nchar(strings) - 1)
+    return(without_last_digit)
+  } else {
+    stop("Input must be a character vector.")
+  }
+}
+
+morph_df$cultureFac2 <- remove_last_digit(morph_df$cultureFac)
+abnorm_df$cultureFac2 <- remove_last_digit(abnorm_df$cultureFac)
+
+spi_sum <- summarySE(measurevar = "Spi_norm",
+                     groupvars = c("treat_dev", "cultureFac", "cultureFac2", "Dam", "Sire"),
+                     data = morph_df)
+
+bod_sum <- summarySE(measurevar = "Length.bod",
+                     groupvars = c("treat_dev", "cultureFac", "cultureFac2", "Dam", "Sire"),
+                     data = morph_df)
+
+# Merge abnorm data with summed performance df's
+sel_grad_spi <- merge(spi_sum, abnorm_df, by = "cultureFac")
+sel_grad_bod <- merge(bod_sum, abnorm_df, by = "cultureFac")
+
+### Spicule length
+
+# Create plasticity variables and merge into summed df's
+sel_grad_spi_N <- dplyr::filter(sel_grad_spi, treat_dev == "N")
+sel_grad_spi_U <- filter(sel_grad_spi, treat_dev == "U")
+
+spi_pl <- unique(merge(
+  data.frame(Sibship = gsub("_.*", "", sel_grad_spi_N$cultureFac2.x),
+             N_spi = sel_grad_spi_N$Spi_norm),
+  data.frame(Sibship = gsub("_.*", "", sel_grad_spi_U$cultureFac2.x),
+             U_spi = sel_grad_spi_U$Spi_norm),
+  by = "Sibship"))
+
+spi_pl$Spi_pl <- spi_pl$U_spi - spi_pl$N_spi
+sel_grad_spi$Sibship <- gsub("_.*", "", sel_grad_spi$cultureFac)
+sel_grad_spi <- merge(sel_grad_spi, spi_pl, by = "Sibship")
+
+# Create parental environment variable for sel grad models
+sel_grad_spi$treat_par <- gsub("^(.).*", "\\1", sel_grad_spi$cultureFac)
+
+### Body size
+
+# Create plasticity variables and merge into summed df's
+sel_grad_bod_N <- filter(sel_grad_bod, treat_dev == "N")
+sel_grad_bod_U <- filter(sel_grad_bod, treat_dev == "U")
+
+bod_pl <- unique(merge(
+  data.frame(Sibship = gsub("_.*", "", sel_grad_bod_N$cultureFac2.x),
+             N_bod = sel_grad_bod_N$Length.bod),
+  data.frame(Sibship = gsub("_.*", "", sel_grad_bod_U$cultureFac2.x),
+             U_bod = sel_grad_bod_U$Length.bod),
+  by = "Sibship"))
+
+bod_pl$Bod_pl <- bod_pl$U_bod - bod_pl$N_bod
+
+sel_grad_bod$Sibship <- gsub("_.*", "", sel_grad_bod$cultureFac)
+sel_grad_bod <- merge(sel_grad_bod, bod_pl, by = "Sibship")
+
+# Create parental environment variable for sel grad models
+sel_grad_bod$treat_par <- gsub("^(.).*", "\\1", sel_grad_bod$cultureFac)
+
+# Fit beta distribution brm to accommodate dist of outcome variable
+pedi <- read.csv("Pedigree/pedigree_sel.csv")
+pedi_p <- prepPed(pedi)
+
+# Function to calculate relatedness
+# Function to calculate relatedness
+calculate_relatedness <- function(ped) {
+  n <- nrow(ped)
+  relatedness_matrix <- matrix(0, n, n, dimnames = list(ped$ID, ped$ID))
+  
+  for (i in 1:n) {
+    for (j in i:n) {
+      if (i == j) {
+        if (ped$ID[i] %in% ped$Dam | ped$ID[i] %in% ped$Sire) {
+          relatedness_matrix[i, j] <- 1 # Same parental IDs
+        } else {
+          relatedness_matrix[i, j] <- 0.5 # Same offspring ID (full siblings)
+        }
+      } else {
+        dam_i <- ped$Dam[i]
+        sire_i <- ped$Sire[i]
+        dam_j <- ped$Dam[j]
+        sire_j <- ped$Sire[j]
+        
+        if (!is.na(dam_i) & !is.na(dam_j) & dam_i == dam_j) {
+          if (!is.na(sire_i) & !is.na(sire_j) & sire_i == sire_j) {
+            relatedness_matrix[i, j] <- 0.5 # Full siblings
+          } else {
+            relatedness_matrix[i, j] <- 0.25 # Half siblings (same dam)
+          }
+        } else if (!is.na(sire_i) & !is.na(sire_j) & sire_i == sire_j) {
+          relatedness_matrix[i, j] <- 0.25 # Half siblings (same sire)
+        } else if ((!is.na(dam_i) & dam_i == ped$ID[j]) | (!is.na(dam_j) & dam_j == ped$ID[i]) |
+                   (!is.na(sire_i) & sire_i == ped$ID[j]) | (!is.na(sire_j) & sire_j == ped$ID[i])) {
+          relatedness_matrix[i, j] <- 0.5 # Parent-offspring
+        } else {
+          relatedness_matrix[i, j] <- 0 # Unrelated
+        }
+        
+        relatedness_matrix[j, i] <- relatedness_matrix[i, j]
+      }
+    }
+  }
+  
+  return(relatedness_matrix)
+}
+
+# Function to ensure positive definiteness
+make_positive_definite <- function(mat, epsilon = 1e-6) {
+  eigvals <- eigen(mat)$values
+  if (all(eigvals > 0)) {
+    return(mat)
+  } else {
+    adjustment <- (epsilon - min(eigvals)) * diag(nrow(mat))
+    return(mat + adjustment)
+  }
+}
+
+# Apply the in house function
+cstm_A_mat <- as.matrix(calculate_relatedness(pedi_p))
+
+cstm_A_mat <- make_positive_definite(cstm_A_mat)
+
+
+```
+
+```{r}
+
+relat_m <- as.matrix(makeA(pedi_p))
+
+sel_grad_spi$ID <- sel_grad_spi$cultureFac2.x
+sel_grad_bod$ID <- sel_grad_bod$cultureFac2.x
+
+# spi_sel_brm <- brm((percAb + 0.0001) ~ scale(Spi_norm) + scale(Spi_pl) +
+#                        treat_dev + treat_par + (1 | gr(ID, cov = cstm_A_mat)),
+#                 data = sel_grad_spi,
+#                 data2 = list(cstm_A_mat = cstm_A_mat),
+#                 family = Beta(link = "logit"),
+#                 chains = 4, cores = 2, iter = 40000)
+# 
+# spi_sel_brm2 <- brm((percAb + 0.0001) ~ scale(Spi_norm) + scale(Spi_pl) +
+#                        scale(Spi_norm):treat_dev + scale(Spi_pl):treat_dev +
+#                        treat_dev + treat_par + (1 | gr(ID, cov = cstm_A_mat)),
+#                 data = sel_grad_spi,
+#                 data2 = list(cstm_A_mat = cstm_A_mat),
+#                 family = Beta(link = "logit"),
+#                 chains = 4, cores = 2, iter = 40000)
+
+spi_sel_brm3 <- brm(percAb ~ scale(Spi_pl) + scale(Spi_pl):treat_dev + scale(Spi_pl):treat_par + 
+                       scale(Spi_norm) + scale(Spi_norm):treat_dev + scale(Spi_norm):treat_par +
+                       treat_dev + treat_par + (1 | gr(ID, cov = cstm_A_mat)),
+                data = sel_grad_spi,
+                data2 = list(cstm_A_mat = cstm_A_mat),
+                family = zero_inflated_beta(),
+                chains = 4, cores = 2, iter = 40000)
+
+bod_sel_brm3 <- brm(percAb ~ scale(Length.bod) + scale(Bod_pl) +
+                       scale(Length.bod):treat_dev + scale(Bod_pl):treat_dev +
+                       scale(Length.bod):treat_par + scale(Bod_pl):treat_par +
+                       treat_dev + treat_par + (1 | gr(ID, cov = cstm_A_mat)),
+                data = sel_grad_bod,
+                data2 = list(cstm_A_mat = cstm_A_mat),
+                family = zero_inflated_beta(),
+                chains = 4, cores = 2, iter = 40000)
+
+
+save(bod_sel_brm3, spi_sel_brm3, file = "CP_selgrad_models.Rdata")
+
+save(bod_sel_brm3, file = "bod_sel_brm3.Rdata")
+
+load("CP_selgrad_models.Rdata")
+
+# Beta reg selection gradient model
+posterior_summary(spi_sel_brm3)
+posterior_summary(bod_sel_brm3)
+
+
+conditional_effects(spi_sel_brm3)
+conditional_effects(bod_sel_brm3)
+
+pp_check(spi_sel_brm3)
+
+posterior_summary(bod_sel_brm3)
+
+pp_check(bod_sel_brm3)
+
+```
+
+```{R}
+summary(lm((percAb + 0.0001) ~ scale(Bod_pl),
+           data = sel_grad_bod,
+           family = "beta"))
+
+# Plot raw biomin pl selection gradients
+sel_grad_spi$percNorm <- 1- sel_grad_spi$percAb
+sel_grad_bod$percNorm <- 1- sel_grad_bod$percAb
+
+sel_grad_spi_sum <- summarySE(measurevar = "Spi_pl",
+                              groupvars = c("treat_dev", 
+                                            "treat_par","ID"),
+                              data = sel_grad_spi)
+
+sel_grad_spinorm_sum <- summarySE(measurevar = "Spi_norm",
+                              groupvars = c("treat_dev", 
+                                            "treat_par","ID"),
+                              data = sel_grad_spi)
+
+sel_grad_bod_sum <- summarySE(measurevar = "Bod_pl",
+                              groupvars = c("treat_dev", 
+                                            "treat_par","ID"),
+                              data = sel_grad_bod)
+
+sel_grad_len_sum <- summarySE(measurevar = "Length.bod",
+                              groupvars = c("treat_dev", 
+                                            "treat_par","ID"),
+                              data = sel_grad_bod)
+
+
+sel_grad_spi_summed <- summarySE(measurevar = "percNorm",
+                              groupvars = c("treat_dev", 
+                                            "treat_par","ID"),
+                              data = sel_grad_spi)
+
+sel_grad_spinorm_summed <- summarySE(measurevar = "percNorm",
+                              groupvars = c("treat_dev", 
+                                            "treat_par","ID"),
+                              data = sel_grad_spi)
+
+sel_grad_bod_summed <- summarySE(measurevar = "percNorm",
+                              groupvars = c("treat_dev", 
+                                            "treat_par","ID"),
+                              data = sel_grad_bod)
+
+sel_grad_len_summed <- summarySE(measurevar = "percNorm",
+                              groupvars = c("treat_dev", 
+                                            "treat_par","ID"),
+                              data = sel_grad_bod)
+
+sel_grad_spi_sum$ID_dev <- paste(sel_grad_spi_sum$ID, 
+                                 sel_grad_spi_sum$treat_dev,
+                                 sep = "_")
+
+sel_grad_bod_sum$ID_dev <- paste(sel_grad_bod_sum$ID, 
+                                 sel_grad_bod_sum$treat_dev,
+                                 sep = "_")
+
+sel_grad_spinorm_sum$ID_dev <- paste(sel_grad_spinorm_sum$ID, 
+                                 sel_grad_spinorm_sum$treat_dev,
+                                 sep = "_")
+
+sel_grad_len_sum$ID_dev <- paste(sel_grad_len_sum$ID, 
+                                 sel_grad_len_sum$treat_dev,
+                                 sep = "_")
+
+sel_grad_spi_sum <- merge(data.frame(ID_dev = paste(sel_grad_spi_summed$ID, 
+                                 sel_grad_spi_summed$treat_dev,
+                                 sep = "_"),
+                                 percNorm = sel_grad_spi_summed$percNorm,
+                                 percNorm_sd = sel_grad_spi_summed$sd),
+                          sel_grad_spi_sum,
+                          by = c("ID_dev"))
+
+sel_grad_spinorm_sum <- merge(data.frame(ID_dev = paste(sel_grad_spinorm_summed$ID, 
+                                 sel_grad_spinorm_summed$treat_dev,
+                                 sep = "_"),
+                                 percNorm = sel_grad_spinorm_summed$percNorm,
+                                 percNorm_sd = sel_grad_spinorm_summed$sd),
+                          sel_grad_spinorm_sum,
+                          by = c("ID_dev"))
+
+sel_grad_bod_sum <- merge(data.frame(ID_dev = paste(sel_grad_bod_summed$ID, 
+                                 sel_grad_bod_summed$treat_dev,
+                                 sep = "_"),
+                                 percNorm = sel_grad_bod_summed$percNorm,
+                                 percNorm_sd = sel_grad_bod_summed$sd),
+                          sel_grad_bod_sum,
+                          by = c("ID_dev"))
+
+sel_grad_len_sum <- merge(data.frame(ID_dev = paste(sel_grad_len_sum$ID, 
+                                 sel_grad_len_sum$treat_dev,
+                                 sep = "_"),
+                                 percNorm = sel_grad_len_summed$percNorm,
+                                 percNorm_sd = sel_grad_len_summed$sd),
+                          sel_grad_len_sum,
+                          by = c("ID_dev"))
+
+ng_spi_pl <-cbind(na.omit(sel_grad_spi),
+       fitted(spi_sel_brm3))
+
+# # Step 1: Extract predicted effects
+# effects_spi <- conditional_effects(spi_sel_brm3)
+# ng_spi_pl <- data.frame(
+#   lower = 1 - effects_spi$`Spi_pl:treat_dev`$lower__,
+#   upper = 1 - effects_spi$`Spi_pl:treat_dev`$upper__,
+#   se = effects_spi$`Spi_pl:treat_dev`$se__,
+#   Spi_pl = effects_spi$`Spi_pl:treat_dev`$Spi_pl,
+#   percNorm = 1 - effects_spi$`Spi_pl:treat_dev`$estimate__,
+#   treat_dev = effects_spi$`Spi_pl:treat_dev`$treat_dev,
+#   treat_par = effects_spi$`Spi_pl:treat_dev`$treat_par) # Adjust 'x' based on your variable of interest
+
+sel_grad_spi_sum$treat_par <- ifelse(
+  sel_grad_spi_sum$treat_par == "N", 
+  "Parental non-upwelling", 
+  "Parental upwelling")
+
+sel_grad_spinorm_sum$treat_par <- ifelse(
+  sel_grad_spinorm_sum$treat_par == "N", 
+  "Parental non-upwelling", 
+  "Parental upwelling")
+
+ng_spi_pl$treat_par <- ifelse(
+  ng_spi_pl$treat_par == "N", 
+  "Parental non-upwelling", 
+  "Parental upwelling")
+
+Fig3Apl <- ggplot(data = sel_grad_spi_sum,
+       aes(x = Spi_pl, y = percNorm)) +
+  geom_errorbar(aes(ymin = percNorm - percNorm_sd, 
+                    ymax = percNorm + percNorm_sd,
+                    color = treat_par, fill = treat_par), 
+                width = 0, size = 0.25, alpha = 0.5) +
+  geom_errorbar(data = sel_grad_spi_sum,
+                aes(xmin = Spi_pl - sd, xmax = Spi_pl + sd,
+                    color = treat_par, fill = treat_par), 
+                width = 0, size = 0.25, alpha = 0.5) +
+  stat_smooth(data = ng_spi_pl,
+              aes(color = treat_par, fill = treat_par),
+              method = "glm", method.args = list(family = "binomial"), 
+              fullrange = TRUE, se = TRUE, alpha = 0.5) +
+  geom_point(aes(color = treat_par, fill = treat_par)) +
+  facet_wrap(~treat_par) +
+  theme_classic(base_rect_size = 0, base_size = 20) +
+  theme(axis.title.y = element_blank()) +
+  scale_color_viridis_d(guide ="none") +
+  scale_fill_viridis_d(guide = "none") +
+  labs(x = "Plasticity of biomineralization",
+       y = "Normal development",
+       color = "Dev. treatment")
+
+Fig3Apl
+
+# Biomin norm
+# ng_spi_norm <- data.frame(
+#   lower = 1 - effects_spi$`Spi_norm:treat_dev`$lower__,
+#   upper = 1 - effects_spi$`Spi_norm:treat_dev`$upper__,
+#   se = effects_spi$`Spi_norm:treat_dev`$se__,
+#   Spi_norm = effects_spi$`Spi_norm:treat_dev`$Spi_norm,
+#   percNorm = 1 - effects_spi$`Spi_norm:treat_dev`$estimate__,
+#   treat_dev = effects_spi$`Spi_norm:treat_dev`$treat_dev) # Adjust 'x' based on your variable of interest
+
+# Generate predictions from the model
+
+Fig3Anorm <- ggplot(data = sel_grad_spinorm_sum,
+       aes(x = Spi_norm, y = percNorm)) +
+  geom_errorbar(aes(ymin = percNorm - percNorm_sd, 
+                    ymax = percNorm + percNorm_sd,
+                    color = treat_par, fill = treat_par), 
+                width = 0, size = 0.25, alpha = 0.5) +
+  geom_errorbar(data = sel_grad_spinorm_sum,
+                aes(xmin = Spi_norm - sd, xmax = Spi_norm + sd,
+                    color = treat_par, fill = treat_par), 
+                width = 0, size = 0.25, alpha = 0.5) +
+  stat_smooth(data = ng_spi_pl, 
+              aes(color = treat_par, fill = treat_par),
+              method = "glm", method.args = list(family = "binomial"), 
+              fullrange = TRUE, se = TRUE, alpha = 0.5) +
+  geom_point(aes(color = treat_par, fill = treat_par)) +
+  facet_wrap(~treat_par) +
+  theme_classic(base_rect_size = 0, base_size = 20) +
+  scale_color_viridis_d(guide ="none") +
+  scale_fill_viridis_d(guide = "none") +
+  labs(x = "Biomineralization",
+       y = "Normal development",
+       color = "Dev. treatment")
+
+Fig3Anorm
+
+# Plot raw body size pl selection gradient
+# effects_bod <- conditional_effects(bod_sel_brm3)
+# ng_bod_pl <- data.frame(
+#   lower = 1 - effects_bod$`Bod_pl:treat_dev`$lower__,
+#   upper = 1 - effects_bod$`Bod_pl:treat_dev`$upper__,
+#   se = effects_bod$`Bod_pl:treat_dev`$se__,
+#   Bod_pl = effects_bod$`Bod_pl:treat_dev`$Bod_pl,
+#   percNorm = 1 - effects_bod$`Bod_pl:treat_dev`$estimate__,
+#   treat_dev = effects_bod$$treat_dev,
+#   treat_par = effects_bod$`Bod_pl:treat_dev`$treat_par)
+
+ng_bod_pl <-cbind(na.omit(sel_grad_bod),
+       fitted(bod_sel_brm3))
+
+Fig3Bpl <- ggplot(data = sel_grad_bod_sum,
+       aes(x = Bod_pl, y = percNorm)) +
+  geom_errorbar(aes(ymin = percNorm - percNorm_sd, 
+                    ymax = percNorm + percNorm_sd,
+                    color = treat_par, fill = treat_par), 
+                width = 0, size = 0.25, alpha = 0.5) +
+  geom_errorbar(data = sel_grad_bod_sum,
+                aes(xmin = Bod_pl - sd, xmax = Bod_pl + sd,
+                    color = treat_par, fill = treat_par), 
+                width = 0, size = 0.25, alpha = 0.25) +
+  stat_smooth(data = ng_bod_pl, 
+              aes(color = treat_par, fill = treat_par),
+              method = "glm", method.args = list(family = "binomial"), 
+              fullrange = TRUE, se = TRUE, alpha = 0.5) +
+  geom_point(aes(color = treat_par, fill = treat_par)) +
+  facet_wrap(~treat_par) +
+  theme_classic(base_rect_size = 0, base_size = 20) +
+  theme(axis.title.y = element_blank(),
+        strip.text = element_blank()) +
+  scale_color_viridis_d(guide ="none") +
+  scale_fill_viridis_d(guide = "none") +
+  labs(x = "Plasticity of body size",
+       y = "Normal development",
+       color = "Dev. treatment")
+
+Fig3Bpl
+
+# Selection on body length
+
+Fig3Blen <- ggplot(data = sel_grad_len_sum,
+       aes(x = Length.bod, y = percNorm)) +
+  geom_errorbar(aes(ymin = percNorm - percNorm_sd, 
+                    ymax = percNorm + percNorm_sd,
+                    color = treat_par, fill = treat_par), 
+                width = 0, size = 0.25, alpha = 0.5) +
+  geom_errorbar(data = sel_grad_len_sum,
+                aes(xmin = Length.bod - sd, xmax = Length.bod + sd,
+                    color = treat_par, fill = treat_par), 
+                width = 0, size = 0.25, alpha = 0.5) +
+  stat_smooth(data = ng_bod_pl, 
+              aes(group = treat_par, color = treat_par, fill = treat_par),
+              method = "glm", method.args = list(family = "binomial"), 
+              fullrange = TRUE, se = TRUE, alpha = 0.5) +
+  geom_point(aes(color = treat_par, fill = treat_par)) +
+  facet_wrap(~treat_par) +
+  scale_x_continuous(breaks = c(0.12, 0.14, 0.16)) +
+  theme_classic(base_rect_size = 0, base_size = 20) +
+  theme(strip.text = element_blank()) +
+  scale_color_viridis_d(guide ="none") +
+  scale_fill_viridis_d(guide = "none") +
+  labs(x = "Body size (μ)",
+       y = "Normal development",
+       color = "Dev. treatment")
+
+Fig3Blen
+
+Fig3Ap <- ggarrange(Fig3Anorm, Fig3Apl,
+                   labels = c("", ""),
+                   heights = c(1, 1),
+                   widths = c(1, 1),
+                   ncol = 2, nrow = 1, align = "hv")
+
+Fig3Bp <- ggarrange(Fig3Blen, Fig3Bpl,
+                   labels = c("", ""),
+                   heights = c(1, 1),
+                   widths = c(1, 1),
+                   ncol = 2, nrow = 1, align = "hv")
+
+Fig3ab <- ggarrange(Fig3Ap, Fig3Bp,
+                   labels = c("A", "B"),
+                   heights = c(1, 1),
+                   widths = c(1, 1),
+                   ncol = 1, nrow = 2, align = "hv")
+
+ggsave(Fig3ab,
+       units = "in", width = 12, height = 12, 
+       filename = "~/Documents/GitHub/Cross_pHox/Fig3ab.png",
+       bg = "white")
+
+```
+
+```{r}
+## Create poster version of selection gradient plots
+# Combine body size and spicule length data sets
+plot1_df <- rbind(
+  data.frame(Trait = "Biomineralization",
+             percNorm = sel_grad_spi_sum$percNorm,
+             percNorm_sd = sel_grad_spi_sum$percNorm_sd / mean(sel_grad_spi_sum$percNorm),
+             Plast_sc = scale(sel_grad_spi_sum$Spi_pl),
+             sd = sel_grad_spi_sum$sd / mean(na.omit(sel_grad_spi_sum$Spi_pl)),
+             treat_par = sel_grad_spi_sum$treat_par,
+             treat_dev = sel_grad_spi_sum$treat_dev),
+  data.frame(Trait = "Body size",
+             percNorm = sel_grad_bod_sum$percNorm,
+             percNorm_sd = sel_grad_bod_sum$percNorm_sd / mean(sel_grad_bod_sum$percNorm),
+             Plast_sc = scale(sel_grad_bod_sum$Bod_pl),
+             sd = sel_grad_spi_sum$sd / mean(na.omit(sel_grad_bod_sum$Bod_pl)),
+             treat_par = sel_grad_bod_sum$treat_par,
+             treat_dev = sel_grad_bod_sum$treat_dev))
+
+plot1_smooth_df <- rbind(
+  data.frame(Trait = "Biomineralization",
+             percNorm = sel_grad_spi$percNorm,
+             Plast_sc = scale(sel_grad_spi$Spi_pl),
+             treat_par = sel_grad_spi$treat_par,
+             treat_dev = sel_grad_spi$treat_dev),
+  data.frame(Trait = "Body size",
+             percNorm = sel_grad_bod$percNorm,
+             Plast_sc = scale(sel_grad_bod$Bod_pl),
+             treat_par = sel_grad_bod$treat_par,
+             treat_dev = sel_grad_bod$treat_dev))
+
+# Create plot
+plot1_df$Par <- ifelse(plot1_df$treat_par == "N", "Parental Non-upwelling",
+                       "Parental Upwelling")
+plot1_smooth_df$Par <- ifelse(plot1_smooth_df$treat_par == "N", "Parental Non-upwelling",
+                       "Parental Upwelling")
+
+plot1_df$Par_trait <- paste(plot1_df$Par, plot1_df$Trait, sep = "_")
+plot1_smooth_df$Par_trait <- paste(plot1_smooth_df$Par, plot1_smooth_df$Trait, sep = "_")
+
+Fig1_post <- ggplot(data = plot1_df,
+       aes(x = Plast_sc, y = percNorm, group = treat_dev, 
+           color = treat_dev, fill = treat_dev)) +
+  #geom_errorbar(aes(ymin = percNorm - percNorm_sd, 
+                    #ymax = percNorm + percNorm_sd), 
+                #width = 0, size = 0.25, alpha = 0.5) +
+  #geom_errorbar(data = plot1_df,
+                #aes(xmin = Plast_sc - sd, xmax = Plast_sc + sd), 
+                #width = 0, size = 0.25, alpha = 0.5) +
+  geom_point(size = 3) +
+  geom_smooth(aes(group = treat_dev),
+              data = plot1_smooth_df, method = "lm", alpha = 0.25) +
+  facet_grid(Trait~Par) +
+  theme_classic(base_rect_size = 0, base_size = 25) +
+  theme(panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    linewidth = 2),
+                                    legend.background = element_rect(fill = "transparent"),
+        axis.line = element_line(size = 0),
+        panel.background = element_rect(fill = "transparent"),
+        strip.background = element_rect(fill = "transparent"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        plot.background = element_rect(fill = "transparent", color = NA),
+        legend.position = "right", 
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 12)) +
+  scale_color_viridis_d(begin = 0, end = 0.9, guide = "none") +
+  scale_fill_viridis_d(begin = 0, end = 0.9, guide = "none") +
+  labs(x = "Scaled plasticity",
+       y = "% Normal development",
+       color = "Dev. treatment")
+
+Fig1_post
+
+ggsave(Fig1_post,
+       units = "in", width = 9, height = 8, 
+       filename = "~/Documents/GitHub/Cross_pHox/Fig1_post.png",
+       bg = "transparent")
+
+# Plot unscaled biomin plasticity
+ggplot(data = sel_grad_spi_sum,
+       aes(x = treat_par, y = Spi_pl)) +
+  geom_jitter(width = 0.1)
+
+
+```
+
+```{r}
+
+# Filter df's for dev DEGs
+tab_dev_filt <- filter(tab_exp_df, geneid %in% row.names(dev_QLFT_cutoff_df))
+tab_m_dev_filt <- filter(tab_morph_df, geneid %in% row.names(dev_QLFT_cutoff_df))
+
+# Add sign of DE as variable (-1 or 1)
+tab_dev_filt <- merge(tab_dev_filt,
+                      data.frame(geneid = row.names(dev_QLFT_cutoff_df),
+                         sign = ifelse(dev_QLFT_cutoff_df$logFC >1, 1, -1)),
+                      by = "geneid")
+
+tab_m_dev_filt <- merge(tab_m_dev_filt,
+                      data.frame(geneid = row.names(dev_QLFT_cutoff_df),
+                         sign = ifelse(dev_QLFT_cutoff_df$logFC >1, 1, -1)),
+                      by = "geneid")
+
+tab_morph_df <- merge(tab_morph_df,
+                      data.frame(geneid = row.names(dev_QLFT$table),
+                         sign = ifelse(dev_QLFT$table$logFC >1, 1, -1)),
+                      by = "geneid")
+
+# Scale CPM and transform it by units-toward-DE sign
+tab_dev_filt$scCPM <- scale(tab_dev_filt$CPM)
+tab_m_dev_filt$scCPM <- scale(tab_m_dev_filt$CPM)
+tab_morph_df$scCPM<- scale(tab_morph_df$CPM)
+
+tab_dev_filt$dirCPM <- tab_dev_filt$scCPM * tab_dev_filt$sign
+tab_m_dev_filt$dirCPM <- tab_m_dev_filt$scCPM * tab_m_dev_filt$sign
+tab_morph_df$dirCPM <- tab_morph_df$scCPM * tab_morph_df$sign
+
+# Fit structural equation model: 
+# (i) dev -> (1-abnorm), GE and (ii)  dev -> (1-abnorm)
+
+# Fit abnorm SEM models - time = < 1 min
+lm1s <- dlply(tab_dev_filt, c("geneid"), function(df) 
+lm(dirCPM ~ Dev, data = df))
+
+lm2s <- dlply(tab_dev_filt, c("geneid"), function(df) 
+lm(PercAb ~ Dev + dirCPM, data = df))
+
+## If dev treat contains NA coefficient, remove from lm1 and lm2
+# First, convert lm's to coefficient df's
+lm1_coefs <- list() 
+
+for (i in 1:length(lm1s)) {
+ lm1_coefs[[i]] <- as.data.frame(lm1s[[i]]$effects)[2,1]
+}
+names(lm1_coefs) <- names(lm1s)
+
+lm2_coefs <- list() 
+
+for (i in 1:length(lm2s)) {
+ lm2_coefs[[i]] <- as.data.frame(lm2s[[i]]$effects)
+}
+names(lm2_coefs) <- names(lm2s)
+
+lm1_pvals <- list() 
+
+# Report significant DM exons
+
+for (i in 1:length(lm1s)) {
+ lm1_pvals[[i]] <- as.data.frame(anova(lm1s[[i]]))[1,5]
+}
+names(lm1_pvals) <- names(lm1s)
+
+# Perform mediation analysis testing for adaptive differential expression
+# e.g. DE results in greater fitness (less abnormality and high survival)
+
+# Mediation of dev abnorm effect by gene expression - time = 1.5 hrs
+dev_mediations <- list() # Create list to add vcov results to
+
+for (i in 1:length(lm1s)) {
+ tryCatch({dev_mediations[[i]] <- summary(mediate(lm1s[[i]], 
+                                                  lm2s[[i]], 
+                                                  sims = 1000, 
+                                                  treat = "Dev", 
+                                                  mediator = "dirCPM"))}, 
+          error=function(e){})
+}
+
+names(dev_mediations) <- names(lm1s)
+
+# Save and reload mediation
+save(dev_mediations, file = "dev_mediations.Rdata")
+```
+
+
+```{r}
+
+load("dev_mediations.Rdata")
+
+# Filter for sig mediation: partition by + and - effects
+# Extract p-values for indirect effects: E -> M -> GE
+ind_p_d <- list() 
+
+for (i in 1:length(dev_mediations)) {
+ ind_p_d[[i]] <- dev_mediations[[i]]$d0.p 
+}
+names(ind_p_d) <- names(dev_mediations)
+
+# Extract indirect effect confidence intervals
+ind_ci_d <- list() 
+
+for (i in 1:length(dev_mediations)) {
+ ind_ci_d[[i]] <- data.frame(t(as.data.frame(dev_mediations[[i]]$d0.ci)))
+}
+names(ind_ci_d) <- names(dev_mediations)
+
+ind_p_vd <- list() 
+
+# Extract indirect effect estimates
+ind_est_d <- list() 
+
+for (i in 1:length(dev_mediations)) {
+ ind_est_d[[i]] <- data.frame(t(as.data.frame(dev_mediations[[i]]$d0)))
+}
+names(ind_est_d) <- names(dev_mediations)
+
+ind_est_d_df <- bind_rows(ind_est_d, .id = "column_label")
+
+ind_p_vd <- list()
+
+# Create df with geneid and indirect effect pvals
+for (i in 1:length(ind_p_d)) {
+ new_value_d <- as.numeric(ind_p_d[[i]])
+ ind_p_vd <- c(ind_p_vd, new_value_d)
+}
+
+ind_ci_d_df <- bind_rows(ind_ci_d, .id = "column_label")
+
+# Create df with geneid and indirect effect pvals
+ind_p_dfd <- as.data.frame(t(data.frame(ind_p_vd)))
+
+ind_p_dfd$fdr <- p.adjust(ind_p_dfd$V1, method = "fdr")
+
+nrow(filter(ind_p_dfd, fdr < 0.05)) # 1421 / 4493 (16% of DE has mediated fitness effect)
+
+# Filter to include only transcripts with significant mediation parameter estimate
+sig_dev_meth_dfd <- filter(ind_ci_d_df, X2.5. > 0 & X97.5. > 0 | X2.5. < 0 & X97.5. < 0) # 66 mat indirect genes
+nrow(sig_dev_meth_dfd)
+
+# 32% of DE has mediated fitness effect
+nrow(sig_dev_meth_dfd) / 4493
+
+## Separate mediated genes based on +/- fitness effects
+# What percent of fitness effects are adaptive? 33.15% or 471 genes
+nrow(filter(sig_dev_meth_dfd, X2.5. < 0)) /
+  nrow(sig_dev_meth_dfd)
+
+## Plot fitness effects of differential expression
+# Create plotting df
+ind_df <- data.frame(geneid = ind_ci_d_df$column_label,
+                     fit_eff = -1*ind_est_d_df$t.as.data.frame.dev_mediations..i...d0..,
+                     ci_2.5 = -1*ind_ci_d_df$X2.5.,
+                     ci_97.5 = -1*ind_ci_d_df$X97.5.)
+
+ind_df <- merge(ind_df,
+                data.frame(geneid = row.names(dev_QLFT_cutoff_df),
+                           logFC = dev_QLFT_cutoff_df$logFC,
+                           logCPM = dev_QLFT_cutoff_df$logCPM),
+                by = "geneid")
+
+ind_df$Dir <- ifelse(ind_df$fit_eff > 0, "Adaptive", "Maladaptive")
+
+ggplot(data = ind_df,
+       aes(y = abs(logFC), x = fit_eff)) +
+  geom_point(aes(color = Dir), size = 0.25, alpha = 1) +
+  geom_smooth(method = "lm", formula = y~poly(x,2), 
+              alpha = 0.25, color = "black") +
+  theme_classic() +
+  scale_color_manual(values = c("salmon1", "royalblue")) +
+  labs(title = "DE's maladaptive effects were stronger than adaptive effects",
+       subtitle = "All points represent DEGs",
+       y = "Absolute logFC",
+       x = "Fitness effect (abnormality)",
+       color = "Effect")
+
+```
+
+```{r}
+
+# Fit abnorm SEM models - time = < 1 min
+tab_morph_df$Spic_norm <- tab_m_dev_filt$Length_spi / 
+  tab_morph_df$Length_bod
+
+lm3s <- dlply(na.omit(tab_morph_df), c("geneid"), function(df) 
+lm(dirCPM ~ Dev, data = df))
+
+lm4s <- dlply(na.omit(tab_morph_df), c("geneid"), function(df) 
+lm(Spic_norm ~ Dev + dirCPM, data = df))
+
+## If dev treat contains NA coefficient, remove from lm1 and lm2
+# First, convert lm's to coefficient df's
+lm3_coefs <- list() 
+
+for (i in 1:length(lm3s)) {
+ lm3_coefs[[i]] <- as.data.frame(lm3s[[i]]$effects)[2,1]
+}
+names(lm3_coefs) <- names(lm3s)
+
+lm4_coefs <- list() 
+
+for (i in 1:length(lm4s)) {
+ lm4_coefs[[i]] <- as.data.frame(lm4s[[i]]$effects)
+}
+names(lm4_coefs) <- names(lm4s)
+
+lm3_pvals <- list() 
+
+# Report significant DM exons
+
+for (i in 1:length(lm3s)) {
+ lm3_pvals[[i]] <- as.data.frame(anova(lm3s[[i]]))[1,5]
+}
+names(lm3_pvals) <- names(lm3s)
+
+# Perform mediation analysis testing for adaptive differential expression
+# e.g. DE results in greater fitness (less abnormality and high survival)
+
+# Mediation of dev abnorm effect by gene expression - time = 1.5 hrs
+dev_morph_mediations <- list() # Create list to add vcov results to
+
+for (i in 1:length(lm3s)) {
+ tryCatch({dev_morph_mediations[[i]] <- summary(mediate(lm3s[[i]], 
+                                                  lm4s[[i]], 
+                                                  sims = 1000, 
+                                                  treat = "Dev", 
+                                                  mediator = "dirCPM"))}, 
+          error=function(e){})
+}
+
+names(dev_morph_mediations) <- names(lm3s)
+
+# Save and reload mediation
+save(dev_morph_mediations, file = "dev_morph_mediations.Rdata")
+
+```
+
+```{r}
+
+load("dev_morph_mediations.Rdata")
+
+# Filter for sig mediation: partition by + and - effects
+# Extract p-values for indirect effects: E -> M -> GE
+ind_p_dm <- list() 
+
+for (i in 1:length(dev_morph_mediations)) {
+ ind_p_dm[[i]] <- dev_morph_mediations[[i]]$d0.p 
+}
+names(ind_p_dm) <- names(dev_morph_mediations)
+ind_p_df <- data.frame(unlist(bind_rows(ind_p_dm, .id = "column_label")))
+
+# Extract indirect effect confidence intervals
+ind_ci_dm <- list() 
+
+for (i in 1:length(dev_morph_mediations)) {
+ ind_ci_dm[[i]] <- data.frame(t(as.data.frame(dev_morph_mediations[[i]]$d0.ci)))
+}
+names(ind_ci_dm) <- names(dev_morph_mediations)
+
+ind_p_vdm <- list() 
+
+# Extract indirect effect estimates
+ind_est_dm <- list() 
+
+for (i in 1:length(dev_morph_mediations)) {
+ ind_est_dm[[i]] <- data.frame(t(as.data.frame(dev_morph_mediations[[i]]$d0)))
+}
+names(ind_est_dm) <- names(dev_morph_mediations)
+
+ind_est_dm_df <- bind_rows(ind_est_dm, .id = "column_label")
+
+ind_p_vdm <- list()
+
+# Create df with geneid and indirect effect pvals
+for (i in 1:length(ind_p_dm)) {
+ new_value_dm <- as.numeric(ind_p_dm[[i]])
+ ind_p_vdm <- c(ind_p_vdm, new_value_dm)
+}
+
+ind_ci_dm_df <- bind_rows(ind_ci_dm, .id = "column_label")
+
+ind_ci_dm_df <- merge(ind_ci_dm_df,
+                      data.frame(column_label = row.names(ind_p_df),
+                                 p_value = ind_p_df$unlist.bind_rows.ind_p_dm...id....column_label...),
+                      by = "column_label")
+
+ind_ci_dm_df <- merge(ind_ci_dm_df,
+                      data.frame(column_label = ind_est_dm_df$column_label,
+                                 fit_eff = ind_est_dm_df$t.as.data.frame.dev_morph_mediations..i...d0..),
+                      by = "column_label")
+
+# Create df with geneid and indirect effect pvals
+ind_p_dfdm <- as.data.frame(t(data.frame(ind_p_vdm)))
+
+ind_p_dfdm$fdr <- p.adjust(ind_p_dfdm$V1, method = "fdr")
+
+nrow(filter(ind_p_dfdm, fdr < 0.05)) # 1421 / 4493 (16% of DE has mediated fitness effect)
+
+# Filter to include only transcripts with significant mediation parameter estimate
+sig_dev_meth_dfdm <- filter(ind_ci_dm_df, X2.5. > 0 & X97.5. > 0 | X2.5. < 0 & X97.5. < 0) # 66 mat indirect genes
+nrow(filter(sig_dev_meth_dfdm, X2.5. > 0)) # 125
+nrow(filter(sig_dev_meth_dfdm, X2.5. < 0)) # 113
+
+
+# 32% of DE has mediated fitness effect
+nrow(sig_dev_meth_dfdm) / 4493
+
+## Separate mediated genes based on +/- fitness effects
+# What percent of fitness effects are adaptive? 36.11% or 511 genes
+nrow(filter(sig_dev_meth_dfdm, X2.5. > 0)) /
+  nrow(sig_dev_meth_dfdm)
+
+## Plot fitness effects of differential expression
+# Create plotting df
+ind_dfm <- data.frame(geneid = ind_ci_dm_df$column_label,
+                     fit_eff = ind_est_dm_df$t.as.data.frame.dev_morph_mediations..i...d0..,
+                     ci_2.5 = ind_ci_dm_df$X2.5.,
+                     ci_97.5 = ind_ci_dm_df$X97.5.)
+
+ind_dfm <- merge(ind_dfm,
+                data.frame(geneid = row.names(dev_QLFT$table),
+                           logFC = dev_QLFT$table$logFC,
+                           logCPM = dev_QLFT$table$logCPM),
+                by = "geneid")
+
+ind_dfm$Dir <- ifelse(ind_dfm$fit_eff > 0, "Adaptive", "Maladaptive")
+
+ind_dfm$fit_landscape <- ind_dfm$fit_eff * 0.40
+
+spi_sel_brm3
+
+Fig3D <- ggplot(data = ind_dfm,
+       aes(y = abs(logFC), x = fit_eff)) +
+  geom_rect(aes(ymin = 0, ymax = 4,
+                xmin = (fit_eff-.01), xmax = (fit_eff+.01),
+                fill = fit_landscape), alpha = 1) +
+  geom_point(size = 0.1, color = "gray90", alpha = 1) +
+  geom_smooth(method = "lm", formula = y~poly(x,2), 
+              alpha = 0.25, color = "white", fill = "white") +
+  theme_classic(base_size = 20) +
+  theme(axis.title.y = element_blank()) +
+  scale_fill_gradient(low = "skyblue", high = "red") +
+  labs(y = "Absolute logFC",
+       x = "Phenotypic effect (biomineralization)",
+       fill = "Associated fitness",
+       color = "Effect")
+
+Fig3D
+
+# Create signed neglog p-value output for GOMWU
+ind_ci_dm_df$Dir <- ifelse(ind_ci_dm_df$fit_eff > 0, 1, -1)
+
+write.csv(data.frame(geneid = ind_ci_dm_df$column_label,
+                     signed_p = ind_ci_dm_df$Dir * -log(ind_ci_dm_df$p_value)),
+          row.names = FALSE,
+          file = "GO_MWU-master/signed_p_spi_GOMWU.csv")
+
+write.csv(data.frame(geneid = ind_ci_dm_df$column_label,
+                     signed_p = ifelse(ind_ci_dm_df$p_value < 0.05, 1, 0)),
+          row.names = FALSE,
+          file = "GO_MWU-master/fishers_spi_GOMWU.csv")
+```
+
+```{r}
+
+# Fit abnorm SEM models - time = < 1 min
+lm5s <- dlply(na.omit(tab_morph_df), c("geneid"), function(df) 
+lm(dirCPM ~ Dev, data = df))
+
+lm6s <- dlply(na.omit(tab_morph_df), c("geneid"), function(df) 
+lm(Length_bod ~ Dev + dirCPM, data = df))
+
+## If dev treat contains NA coefficient, remove from lm1 and lm2
+# First, convert lm's to coefficient df's
+lm5_coefs <- list() 
+
+for (i in 1:length(lm5s)) {
+ lm5_coefs[[i]] <- as.data.frame(lm5s[[i]]$effects)[2,1]
+}
+names(lm5_coefs) <- names(lm5s)
+
+lm6_coefs <- list() 
+
+for (i in 1:length(lm6s)) {
+ lm6_coefs[[i]] <- as.data.frame(lm6s[[i]]$effects)
+}
+names(lm6_coefs) <- names(lm6s)
+
+lm5_pvals <- list() 
+
+# Report significant DM exons
+
+for (i in 1:length(lm5s)) {
+ lm5_pvals[[i]] <- as.data.frame(anova(lm5s[[i]]))[1,5]
+}
+names(lm5_pvals) <- names(lm5s)
+
+# Perform mediation analysis testing for adaptive differential expression
+# e.g. DE results in greater fitness (less abnormality and high survival)
+
+# Mediation of dev abnorm effect by gene expression - time = 1.5 hrs
+dev_bod_mediations <- list() # Create list to add vcov results to
+
+for (i in 1:length(lm5s)) {
+ tryCatch({dev_bod_mediations[[i]] <- summary(mediate(lm5s[[i]], 
+                                                  lm6s[[i]], 
+                                                  sims = 1000, 
+                                                  treat = "Dev", 
+                                                  mediator = "dirCPM"))}, 
+          error=function(e){})
+}
+
+names(dev_bod_mediations) <- names(lm5s)
+
+# Save and reload mediation
+save(dev_bod_mediations, file = "dev_bod_mediations_all.Rdata")
+
+```
+
+```{r}
+
+load("dev_bod_mediations_all.Rdata")
+
+# Filter for sig mediation: partition by + and - effects
+# Extract p-values for indirect effects: E -> M -> GE
+ind_p_db <- list() 
+
+for (i in 1:length(dev_bod_mediations)) {
+ ind_p_db[[i]] <- dev_bod_mediations[[i]]$d0.p 
+}
+names(ind_p_db) <- names(dev_bod_mediations)
+
+# Extract indirect effect confidence intervals
+ind_ci_db <- list() 
+
+for (i in 1:length(dev_bod_mediations)) {
+ ind_ci_db[[i]] <- data.frame(t(as.data.frame(dev_bod_mediations[[i]]$d0.ci)))
+}
+names(ind_ci_db) <- names(dev_bod_mediations)
+
+ind_p_vdb <- list() 
+
+# Extract indirect effect estimates
+ind_est_db <- list() 
+
+for (i in 1:length(dev_bod_mediations)) {
+ ind_est_db[[i]] <- data.frame(t(as.data.frame(dev_bod_mediations[[i]]$d0)))
+}
+names(ind_est_db) <- names(dev_bod_mediations)
+
+ind_est_db_df <- bind_rows(ind_est_db, .id = "column_label")
+
+ind_p_vdb <- list()
+
+# Create df with geneid and indirect effect pvals
+for (i in 1:length(ind_p_db)) {
+ new_value_db <- as.numeric(ind_p_db[[i]])
+ ind_p_vdb <- c(ind_p_vdb, new_value_db)
+}
+
+ind_ci_db_df <- bind_rows(ind_ci_db, .id = "column_label")
+
+# Create df with geneid and indirect effect pvals
+ind_p_dfdb <- as.data.frame(t(data.frame(ind_p_vdb)))
+
+ind_p_dfdb$fdr <- p.adjust(ind_p_dfdb$V1, method = "fdr")
+
+nrow(filter(ind_p_dfdb, fdr < 0.05)) # 1421 / 4493 (16% of DE has mediated fitness effect)
+
+# Filter to include only transcripts with significant mediation parameter estimate
+sig_dev_meth_dfdb <- filter(ind_ci_db_df, X2.5. > 0 & X97.5. > 0 | X2.5. < 0 & X97.5. < 0) # 66 mat indirect genes
+nrow(filter(sig_dev_meth_dfdb, X2.5. > 0))
+nrow(filter(sig_dev_meth_dfdb, X2.5. < 0))
+
+# 32% of DE has mediated fitness effect
+nrow(sig_dev_meth_dfdb) / 4493
+
+## Separate mediated genes based on +/- fitness effects
+# What percent of fitness effects are adaptive? 36.11% or 511 genes
+nrow(filter(sig_dev_meth_dfdb, X2.5. > 0)) /
+  nrow(sig_dev_meth_dfdb)
+
+## Plot fitness effects of differential expression
+# Create plotting df
+ind_dfb <- data.frame(geneid = ind_ci_db_df$column_label,
+                     fit_eff = ind_est_db_df$t.as.data.frame.dev_bod_mediations..i...d0..,
+                     ci_2.5 = ind_ci_db_df$X2.5.,
+                     ci_97.5 = ind_ci_db_df$X97.5.)
+
+ind_dfb <- merge(ind_dfb,
+                data.frame(geneid = row.names(dev_QLFT$table),
+                           logFC = dev_QLFT$table$logFC,
+                           logCPM = dev_QLFT$table$logCPM),
+                by = "geneid")
+
+ind_dfb$Dir <- ifelse(ind_dfb$fit_eff < 0, "Adaptive", "Maladaptive")
+
+ind_dfb$fit_landscape <- ind_dfb$fit_eff * -0.13
+
+high_color <- "salmon1"
+low_color <- "royalblue"
+
+library(scales)
+
+# Interpolate the color at 32.5% of the gradient
+interpolated_low <- gradient_n_pal(c(low_color, high_color))(.5 - .1625)
+interpolated_hi <- gradient_n_pal(c(low_color, high_color))(.5 + .1625)
+
+
+Fig3C <- ggplot(data = ind_dfb,
+       aes(y = abs(logFC), x = fit_eff)) +
+  geom_rect(aes(ymin = 0, ymax = 5,
+                xmin = (fit_eff-.00075), xmax = (fit_eff+.00075),
+                fill = fit_landscape), alpha = 1) +
+  geom_point(size = 0.1, color = "gray90", alpha = 1) +
+  geom_smooth(method = "lm", formula = y~poly(x,2), 
+              alpha = 0.25, color = "white", fill = "white") +
+  theme_classic(base_size = 20) +
+  scale_fill_gradient(high = "#d8bcbb", low = "#ee765f", guide = "none") +
+  labs(y = "Absolute logFC",
+       x = "Phenotypic effect (body size)",
+       fill = "Associated fitness",
+       color = "Effect")
+
+Fig3C
+
+# Compile Fig 2
+Fig3bot <- ggarrange(Fig3C, Fig3D,
+                  labels = c("", ""),
+                  heights = c(1, 1),
+                  widths = c(.66, 1),
+                  ncol = 2, nrow = 1, align = "h")
+
+Fig3bot
+
+Fig3 <- ggarrange(Fig3ab, Fig3bot,
+                  labels = c("", "C"),
+                  heights = c(2, 1),
+                  widths = c(1, 1),
+                  ncol = 1, nrow = 2, align = "hv")
+
+Fig3
+
+# Export Fig 3 as png
+png("~/Documents/GitHub/Cross_pHox/Fig3.png", units = "in", width = 12, 
+    height = 12, 
+    res = 600)
+
+Fig3
+
+```
+
+#Animal models estimating heritability
+
+```{r}
+
+# Create experimental pedigree
+pedi <- read.csv("Pedigree/pedigree_trimmed.csv")
+pedi_trim <- prepPed(pedi)
+
+wolak_m <- as.matrix(makeA(pedi_trim))
+
+#  Read in metadata
+meta_df <- read.csv("Pedigree/pedigree_meta.csv")
+
+cstm_A_trim <- calculate_relatedness(pedi_trim)
+
+```
+
+```{r}
+
+# Merge meta_df w/ CPM df
+extractAllButLastCharacter <- function(inputString) {
+  allButLast <- substring(inputString, 1, nchar(inputString) - 1)
+  return(allButLast)
+}
+
+tab_exp_df$ID <- extractAllButLastCharacter(as.vector(tab_exp_df$variable))
+
+tab_QG_df <- merge(tab_exp_df,
+                   meta_df,
+                   by = "ID")
+
+tab_QG_df$ID <- paste(tab_QG_df$Dam, 
+                      tab_QG_df$Sire, 
+                      "_", 
+                      tab_QG_df$Dev, 
+                      sep = "")
+
+tab_QG_df <- tab_QG_df %>% group_by(geneid) %>% mutate(CPM_sc = scale((CPM)))
+
+# With nadiv, create a relatedness matrix
+# Relatedness matrix is necessary for brms rather than inverse relatedness
+relat_m <- as.matrix(makeA(pedi_p))
+
+# Fit animal model using lme4qtl
+lmer_test <- relmatLmer(CPM_sc ~ Par + Dev + (1|ID) + (1|Dam) + (1|Sire),
+                            data = filter(tab_QG_df, geneid == "rna-XM_030973936.1"),
+                            relmat = list(ID = wolak_m))
+
+# Print evolvability estimate
+VarProp(lmer_test)[1,6]
+
+# Turn this into a for loop and apply to all DE genes
+#  Next, estimat heritability of plasticity First, create df of plasticity per genotype - 1 min
+tab_QG_filt <- filter(tab_QG_df, geneid %in% row.names(dev_QLFT_cutoff_df))
+
+lme4qtls <- dlply(tab_QG_df, c("geneid"), function(df) 
+relmatLmer(CPM_sc ~ Par + Dev + (1|ID) + (1|Dam) + (1|Sire),
+                            data = df,
+                            relmat = list(ID = cstm_A_trim)))
+
+# With for loop, export h2 values for each gene
+evol_exp <- list()
+
+for (i in 1:length(lme4qtls)) {
+ evol_exp[[i]] <- VarProp(lme4qtls[[i]])[1,6] 
+}
+
+names(evol_exp) <- names(lme4qtls)
+
+lme4qtl_exp_evol_df <- as.data.frame(
+  unlist(
+    bind_rows(evol_exp,
+              .id = "column_label")))
+
+# Plot distribution of expression heritability for DE genes
+ggplot(data = lme4qtl_exp_evol_df,
+       aes(x = `unlist(bind_rows(evol_exp, .id = "column_label"))`)) +
+  geom_density(fill = "grey") +
+  labs(x = "Heritability", title = "Heritability of expression for DEGs")
+
+## Fit animal models for plasticity of expression rather than expression
+# Estimate DE per sibship and add to df
+tab_QG_df$Sibship_geneid <- paste(gsub("_.*", "", tab_QG_df$ID),
+                                   tab_QG_df$geneid,
+                                   sep = "_")
+
+tab_DevN <- filter(tab_QG_df, Dev == "N")
+tab_DevU <- filter(tab_QG_df, Dev == "U")
+
+Sib_FC_df <- merge(
+  data.frame(Sibship_geneid = tab_DevN$Sibship_geneid,
+                       CPM_N = tab_DevN$CPM),
+  data.frame(Sibship_geneid = tab_DevU$Sibship_geneid,
+             CPM_U = tab_DevU$CPM),
+  by = "Sibship_geneid")
+
+Sib_FC_df$Sib_FC <- log(Sib_FC_df$CPM_U/Sib_FC_df$CPM_N, 
+                        base = exp(2))
+
+tab_pl_df <- merge(tab_QG_df,
+                    data.frame(Sibship_geneid = Sib_FC_df$Sibship_geneid,
+                               Sib_FC = Sib_FC_df$Sib_FC),
+                    by = "Sibship_geneid")
+
+tab_pl_filt <- filter(tab_pl_df, geneid %in% row.names(dev_QLFT_cutoff_df))
+tab_pl_df <- tab_pl_df %>% group_by(geneid) %>% mutate(Sib_FC_sc = scale(Sib_FC))
+
+pl_lme4s <- dlply(tab_pl_df, c("geneid"), function(df) 
+relmatLmer(Sib_FC_sc ~ Par + (1|ID) + (1|Dam) + (1|Sire),
+                            data = df,
+                            relmat = list(ID = cstm_A_trim)))
+
+# With for loop, export DE h2 values for each gene
+evol_pl <- list()
+
+for (i in 1:length(pl_lme4s)) {
+ evol_pl[[i]] <- VarProp(pl_lme4s[[i]])[1,6] 
+}
+
+names(evol_pl) <- names(pl_lme4s)
+
+lme4qtl_pl_evol_df <- as.data.frame(
+  unlist(
+    bind_rows(evol_pl,
+              .id = "column_label")))
+
+# Plot distribution of expression heritability for DE genes
+ggplot(data = lme4qtl_pl_evol_df,
+       aes(x = `unlist(bind_rows(evol_pl, .id = "column_label"))`)) +
+  geom_density(fill = "grey") +
+  labs(x = "Heritability", title = "Heritability of DE for DEGs")
+
+# Plot correlation of h2 for expression and DE with histogram on border
+lme4qtl_exp_evol_df$geneid <- row.names(lme4qtl_exp_evol_df)
+lme4qtl_pl_evol_df$geneid <- row.names(lme4qtl_pl_evol_df)
+
+pl_exp_corr <- ggplot(data = merge(lme4qtl_exp_evol_df,
+                    lme4qtl_pl_evol_df,
+                    by = "geneid"),
+                    aes(y = `unlist(bind_rows(evol_pl, .id = "column_label"))`,
+           x = `unlist(bind_rows(evol_exp, .id = "column_label"))`)) +
+  geom_point(alpha = 0.1) +
+  theme_classic(base_size = 20) +
+  labs(x = expression("Expression " ~ italic(h^2)),
+       y = expression("DE " ~ italic(h^2)))
+
+pl_exp_corr
+
+# How heritable is DE in general?
+nrow(filter(lme4qtl_pl_evol_df, `unlist(bind_rows(evol_pl, .id = "column_label"))` >= 0.2)) / 
+  nrow(lme4qtl_pl_evol_df)
+
+mean(lme4qtl_pl_evol_df$`unlist(bind_rows(evol_pl, .id = "column_label"))`)
+sd(lme4qtl_pl_evol_df$`unlist(bind_rows(evol_pl, .id = "column_label"))`)
+
+
+# How heritable are adaptive DEGs?
+bod_ad_geneids <- filter(sig_dev_meth_dfdb, X2.5. < 0 & X97.5. < 0)[,1]
+
+nrow(filter(lme4qtl_pl_evol_df, `unlist(bind_rows(evol_pl, .id = "column_label"))` >= 0.2 &
+              geneid %in% bod_ad_geneids)) / 
+  nrow(filter(lme4qtl_pl_evol_df, geneid %in% bod_ad_geneids))
+
+spi_ad_geneids <- filter(sig_dev_meth_dfdm, X2.5. > 0 & X97.5. > 0)[,1]
+
+nrow(filter(lme4qtl_pl_evol_df, `unlist(bind_rows(evol_pl, .id = "column_label"))` >= 0.2 &
+              geneid %in% spi_ad_geneids)) / 
+  nrow(filter(lme4qtl_pl_evol_df, geneid %in% spi_ad_geneids))
+
+# Was CPM or DE more heritable?
+wilcox.test(lme4qtl_exp_evol_df$`unlist(bind_rows(evol_exp, .id = "column_label"))`, 
+                    lme4qtl_pl_evol_df$`unlist(bind_rows(evol_pl, .id = "column_label"))`)
+
+mean(lme4qtl_exp_evol_df$`unlist(bind_rows(evol_exp, .id = "column_label"))`)
+mean(lme4qtl_pl_evol_df$`unlist(bind_rows(evol_pl, .id = "column_label"))`)
+
+0.267374/0.2229109
+
+```
+
+Experiment with creating high dimensional G matrices
+
+1. Split data of fold changes by adaptive and maladaptive DEGs
+2. Create iterative G matrices and plot their eigenstructure across (mal)adaptive groups
+3. Summarize eigenstructures across matrix iterations to provide a range of covarying DE groups
+
+```{r}
+
+tab_pl_new <- merge(unique(data.frame(Sibship_geneid = tab_QG_df$Sibship_geneid,
+                                     geneid = tab_QG_df$geneid,
+                                     ID = tab_QG_df$ID,
+                                     Dam = tab_QG_df$Dam,
+                                     Sire = tab_QG_df$Sire,
+                                     F0_env = tab_QG_df$F0_env)),
+                    data.frame(Sibship_geneid = Sib_FC_df$Sibship_geneid,
+                               Sib_FC = Sib_FC_df$Sib_FC),
+                    by = "Sibship_geneid")
+
+# Filter down DE df for sig indirect effects
+sig_dev_meth_dfdb_ad <- filter(sig_dev_meth_dfdb, `X2.5.` < 0)
+sig_dev_meth_dfdb_mal <- filter(sig_dev_meth_dfdb, `X2.5.` > 0)
+tab_pl_newf <- filter(tab_pl_new, geneid %in% sig_dev_meth_dfdb_ad$column_label)
+tab_pl_newf2 <- filter(tab_pl_new, geneid %in% sig_dev_meth_dfdb_mal$column_label)
+
+sig_dev_meth_dfdm_ad <- filter(sig_dev_meth_dfdm, `X2.5.` > 0)
+sig_dev_meth_dfdm_mal <- filter(sig_dev_meth_dfdm, `X2.5.` < 0)
+tab_pl_newf3 <- filter(tab_pl_new, geneid %in% sig_dev_meth_dfdm_ad$column_label)
+tab_pl_newf4 <- filter(tab_pl_new, geneid %in% sig_dev_meth_dfdm_mal$column_label)
+
+# How many genes?
+nrow(count(tab_pl_newf$geneid)) #231
+nrow(count(tab_pl_newf3$geneid)) #125
+
+# Transpose df
+spread_df <- tab_pl_newf %>%
+  pivot_wider(names_from = geneid, values_from = Sib_FC, values_fill = list(value = NA), id_cols = ID)
+
+spread_df <- merge(unique(data.frame(ID = tab_pl_newf$ID,
+                                     Dam = tab_pl_newf$Dam,
+                                     Sire = tab_pl_newf$Sire,
+                                     F0 = tab_pl_newf$F0_env)),
+                          spread_df,
+                          by = "ID")
+
+# Plot pairs
+library(psych)
+pairs.panels(varcov_matrix,
+                            method = "pearson", # correlation method
+                            hist.col = "#00AFBB",
+                            density = TRUE,  # show density plots
+                            ellipses = TRUE # show correlation ellipses
+             )
+
+# Eigen plot
+# Calculate eigenvalues and eigenvectors
+eig <- eigen(varcov_matrix)
+eigenvectors <- eig$vectors
+eigenvalues <- eig$values
+
+# Function to plot ellipse
+plot_ellipse <- function(center = c(0, 0), scale = c(1, 1), rotation = 0, ...){
+  t <- seq(0, 2*pi, length.out = 100)
+  ellipse <- tibble::tibble(
+    x = center[1] + scale[1] * cos(t) * cos(rotation) - scale[2] * sin(t) * sin(rotation),
+    y = center[2] + scale[1] * cos(t) * sin(rotation) + scale[2] * sin(t) * cos(rotation)
+  )
+  
+  ggplot(ellipse, aes(x = x, y = y)) + 
+    geom_path(...) + 
+    coord_fixed(ratio = 1) +
+    theme_minimal()
+}
+
+# Plotting the ellipse
+# Scaling by the square root of the eigenvalues and rotating by the angle of the first eigenvector
+angle <- atan2(eigenvectors[2,1], eigenvectors[1,1])
+plot_ellipse(scale = sqrt(eigenvalues), rotation = angle)
+
+```
+
+Attempt high dimensional matrix with individual models rather than multivariate
+
+```{r}
+
+# Function for single permutation of genetric correlation comparison
+split_data_frame <- function(df) {
+  # Split the data frame into two subsets by F0_env
+  df_N <- df[df$F0_env == "N", ]
+  df_U <- df[df$F0_env == "U", ]
+  
+  # Identify unique Sib_IDs in each subset
+  unique_sib_N <- unique(df_N$Sib_ID)
+  unique_sib_U <- unique(df_U$Sib_ID)
+  
+  # Shuffle the Sib_IDs within each subset
+  shuffled_sib_N <- sample(unique_sib_N)
+  shuffled_sib_U <- sample(unique_sib_U)
+  
+  # Split the Sib_IDs into two halves for N and U groups
+  split_N1 <- shuffled_sib_N[1:(length(shuffled_sib_N)/2)]
+  split_N2 <- shuffled_sib_N[(length(shuffled_sib_N)/2 + 1):length(shuffled_sib_N)]
+  
+  split_U1 <- shuffled_sib_U[1:(length(shuffled_sib_U)/2)]
+  split_U2 <- shuffled_sib_U[(length(shuffled_sib_U)/2 + 1):length(shuffled_sib_U)]
+  
+  # Create the new data frames based on the splits
+  df_split1 <- rbind(df_N[df_N$Sib_ID %in% split_N1, ], df_U[df_U$Sib_ID %in% split_U1, ])
+  df_split2 <- rbind(df_N[df_N$Sib_ID %in% split_N2, ], df_U[df_U$Sib_ID %in% split_U2, ])
+  
+  return(list(df1 = df_split1, df2 = df_split2))
+}
+
+# Randomly split up sibship body size and biomineralization data frames
+tab_pl_newf$Sib_ID <- gsub("_.*", "", tab_pl_newf$Sibship_geneid)
+tab_pl_newf3$Sib_ID <- gsub("_.*", "", tab_pl_newf3$Sibship_geneid)
+
+tab_pl_sp <- split_data_frame(tab_pl_newf)
+tab_pl3_sp <- split_data_frame(tab_pl_newf3)
+
+# Check lengths of the two df's
+nrow(tab_pl_sp$df1) - nrow(tab_pl_sp$df2) # equal length
+nrow(tab_pl3_sp$df1) - nrow(tab_pl3_sp$df2) # equal length
+
+# Export split data frames so they can be moved to cluster
+save(cstm_A_trim, tab_pl_sp, tab_pl3_sp, file = "rand_sp_pl_dfs.Rdata")
+
+```
+
+
+```{r}
+
+library(lme4) # Assuming relmatLmer is part of an extension of the lme4 package
+
+# Assuming 'geneID' contains the names of all your geneID variables
+# If 'geneID' is not a vector but a column in a DataFrame, you'll first need to create a vector of unique geneID values.
+#geneIDs <- unique(spread_df_filt$geneID)
+
+# Step 2: Generate all unique pairwise combinations of geneID variables
+geneID_pairs <- combn(unique(tab_pl_newf$geneid), 2, simplify = FALSE) # Each element of the list is a pair of geneIDs
+
+# Initialize a list to store models
+models_N <- list()
+models_U <- list()
+
+# Absolute logFC values
+tab_pl_newf$Abs_Sib_FC <- abs(tab_pl_newf$Sib_FC)
+
+tab_pl_newf_N <- filter(tab_pl_newf, F0_env == "N")
+tab_pl_newf_U <- filter(tab_pl_newf, F0_env == "U")
+
+# Save input data
+write.csv(tab_pl_newf, 
+          "~/Documents/GitHub/Cross_pHox/tab_pl_newf.csv", 
+          row.names = FALSE)
+
+# Step 3: Fit the model for each pair
+for (i in seq_along(geneID_pairs)) {
+  pair <- geneID_pairs[[i]]
+  
+  # Filter data to include only the current pair of gene IDs
+  filtered_data <- dplyr::filter(tab_pl_newf_N, geneid %in% pair)
+  
+  # Fit the model using relmatLmer
+  model <- relmatLmer(Sib_FC ~  (0 + geneid |ID) + (1|Dam) + (1|Sire), 
+                      data = filtered_data, 
+                      relmat = list(ID = cstm_A_trim))
+  
+  # Store the model in the list
+  models_N[[paste(pair[1], pair[2], sep="_")]] <- model
+}
+
+save(models_N, file = "~/Documents/GitHub/Cross_pHox/models_N.Rdata")
+
+# Step 3: Fit the model for each pair
+for (i in seq_along(geneID_pairs)) {
+  pair <- geneID_pairs[[i]]
+  
+  # Filter data to include only the current pair of gene IDs
+  filtered_data <- dplyr::filter(tab_pl_newf_U, geneid %in% pair)
+  
+  # Fit the model using relmatLmer
+  model <- relmatLmer(Sib_FC ~  (0 + geneid |ID) + (1|Dam) + (1|Sire), 
+                      data = filtered_data, 
+                      relmat = list(ID = cstm_A_trim))
+  
+  # Store the model in the list
+  models_U[[paste(pair[1], pair[2], sep="_")]] <- model
+}
+
+save(models_U, file = "~/Documents/GitHub/Cross_pHox/models_U.Rdata")
+
+load("~/Documents/GitHub/Cross_pHox/models.Rdata")
+
+# Estimate G matrix
+nN <- length(models_N) # This might not be the correct dimension; adjust based on your specific case
+combined_var_cov_matrixN <- matrix(NA, nrow = nN, ncol = nN)
+
+nU <- length(models_U) # This might not be the correct dimension; adjust based on your specific case
+combined_var_cov_matrixU <- matrix(NA, nrow = nU, ncol = nU)
+
+# Create list of vcov matrices
+vcov_listN <- list()
+vcov_listU <- list()
+
+for (i in seq_along(models_N)) {
+  model <- models_N[[i]]
+  vcov_listN[[i]] <- as.matrix(VarCorr(model)$ID)[1:2, 1:2]
+}
+
+for (i in seq_along(models_U)) {
+  model <- models_U[[i]]
+  vcov_listU[[i]] <- as.matrix(VarCorr(model)$ID)[1:2, 1:2]
+}
+
+# Create complete matrix
+all_genesN <- unique(unlist(lapply(vcov_listN, rownames)))
+
+full_matrixN <- matrix(0, nrow = length(all_genesN), ncol = length(all_genesN),
+                      dimnames = list(all_genesN, all_genesN))
+
+all_genesU <- unique(unlist(lapply(vcov_listU, rownames)))
+
+full_matrixU <- matrix(0, nrow = length(all_genesU), ncol = length(all_genesU),
+                      dimnames = list(all_genesU, all_genesU))
+
+# Step 3: Iteratively fill the full matrix with values from the pairwise matrices
+for(mat in vcov_listN) {
+  # Get the row and column names of the current matrix
+  genes <- rownames(mat)
+  
+  # Find the indices of these genes in the full matrix
+  indices <- match(genes, all_genesN)
+  
+  # Fill in the corresponding values
+  full_matrixN[indices, indices] <- mat
+}
+
+for(mat in vcov_listU) {
+  # Get the row and column names of the current matrix
+  genes <- rownames(mat)
+  
+  # Find the indices of these genes in the full matrix
+  indices <- match(genes, all_genesU)
+  
+  # Fill in the corresponding values
+  full_matrixU[indices, indices] <- mat
+}
+
+eig <- eigen(full_matrix)
+eigenvectors <- eig$vectors
+eigenvalues <- eig$values
+
+# Function to plot ellipse
+plot_ellipse <- function(center = c(0, 0), scale = c(1, 1), rotation = 0, ...){
+  t <- seq(0, 2*pi, length.out = 100)
+  ellipse <- tibble::tibble(
+    x = center[1] + scale[1] * cos(t) * cos(rotation) - scale[2] * sin(t) * sin(rotation),
+    y = center[2] + scale[1] * cos(t) * sin(rotation) + scale[2] * sin(t) * cos(rotation)
+  )
+  
+  ggplot(ellipse, aes(x = x, y = y)) + 
+    geom_path(...) + 
+    coord_fixed(ratio = 1) +
+    theme_minimal()
+}
+
+# Plotting the ellipse
+# Scaling by the square root of the eigenvalues and rotating by the angle of the first eigenvector
+angle <- atan2(eigenvectors[2,1], eigenvectors[1,1])
+plot_ellipse(scale = sqrt(eigenvalues), rotation = angle)
+
+# How many >1.0 eigenvalues are there?
+count(eigenvalues > 1.0) # 2
+
+# How much variance is explained by V1 and V2? Sum is 38.82
+(max(eigenvalues) / sum(eigenvalues)) * 100 # 33.13 %
+((eigenvalues[2]) / sum(eigenvalues)) * 100 # 21.1 %
+((eigenvalues[3]) / sum(eigenvalues)) * 100 # 18.52 %
+((eigenvalues[4]) / sum(eigenvalues)) * 100 # 14.25 %
+
+# 54 % of expression of adaptive body DEGs is linked two 2 axes of genetic variation
+33.13 + 21.1
+
+# What percent of 'adaptive' body size genes load to these two eigenvectors?
+top2_eigenvectors <- rbind(data.frame(load = as.data.frame(eigenvectors[, 1:2])$V1,
+                                      vector = "V1"),
+                           data.frame(load = as.data.frame(eigenvectors[, 1:2])$V2,
+                                      vector = "V2"))
+
+# Plot distributions of loadings: result shows bimodal, negative genetic correlations between two groups loading to V1
+# As these are all adaptive differentially expressed genes, this suggests that beneficial downregulation of certain genes share genetic associations with the induction of other genes
+ggplot(data = top2_eigenvectors,
+       aes(x = load, group = vector, fill = vector)) +
+  geom_density(alpha = 0.5) 
+
+```
+
+Repeat G matrix estimation for maladaptive body genes
+
+```{r}
+
+tab_pl_newf3$Abs_Sib_FC <- abs(tab_pl_newf3$Sib_FC)
+
+tab_pl_newf3_N <- filter(tab_pl_newf3, F0_env == "N")
+
+tab_pl_newf3_U <- filter(tab_pl_newf3, F0_env == "U")
+
+# Sign DE values toward their adaptive direction
+
+# Step 2: Generate all unique pairwise combinations of geneID variables
+geneID_pairs3_N <- combn(unique(tab_pl_newf3_N$geneid), 2, simplify = FALSE) # Each element of the list is a pair of geneIDs
+
+geneID_pairs3_U <- combn(unique(tab_pl_newf3_U$geneid), 2, simplify = FALSE)
+
+# Initialize a list to store models
+models3_N <- list()
+models3_U <- list()
+
+# Save input data
+# write.csv(tab_pl_newf2, 
+#           "~/Documents/GitHub/Cross_pHox/tab_pl_newf2.csv", 
+#           row.names = FALSE)
+
+# Step 3: Fit the model for each pair
+for (i in seq_along(geneID_pairs3_N)) {
+  pair <- geneID_pairs3_N[[i]]
+  
+  # Filter data to include only the current pair of gene IDs
+  filtered_data <- filter(tab_pl_newf3_N, geneid %in% pair)
+  
+  # Fit the model using relmatLmer
+  model <- relmatLmer(Sib_FC ~ (0 + geneid |ID) + (1|Dam) + (1|Sire), 
+                      data = filtered_data, 
+                      relmat = list(ID = cstm_A_trim))
+  
+  # Store the model in the list
+  models3_N[[paste(pair[1], pair[2], sep="_")]] <- model
+}
+
+save(models3_N, file = "~/Documents/GitHub/Cross_pHox/models3_N.Rdata")
+
+# Step 3: Fit the model for each pair
+for (i in seq_along(geneID_pairs3_U)) {
+  pair <- geneID_pairs3_U[[i]]
+  
+  # Filter data to include only the current pair of gene IDs
+  filtered_data <- filter(tab_pl_newf3_U, geneid %in% pair)
+  
+  # Fit the model using relmatLmer
+  model <- relmatLmer(Sib_FC ~ (0 + geneid |ID) + (1|Dam) + (1|Sire), 
+                      data = filtered_data, 
+                      relmat = list(ID = cstm_A_trim))
+  
+  # Store the model in the list
+  models3_U[[paste(pair[1], pair[2], sep="_")]] <- model
+}
+
+save(models3_U, file = "~/Documents/GitHub/Cross_pHox/models3_U.Rdata")
+
+load("~/Documents/GitHub/Cross_pHox/models3.Rdata")
+
+# Estimate G matrix
+n3N <- length(models3_N)
+combined_var_cov_matrix3N <- matrix(NA, nrow = n3N, ncol = n3N)
+
+n3U <- length(models3_U)
+combined_var_cov_matrix3U <- matrix(NA, nrow = n3U, ncol = n3U)
+
+# Create list of vcov matrices
+vcov_list3N <- list()
+vcov_list3U <- list()
+
+for (i in seq_along(models3_N)) {
+  model3 <- models3_N[[i]]
+  vcov_list3N[[i]] <- as.matrix(VarCorr(model3)$ID)[1:2, 1:2]
+}
+
+for (i in seq_along(models3_U)) {
+  model3 <- models3_U[[i]]
+  vcov_list3U[[i]] <- as.matrix(VarCorr(model3)$ID)[1:2, 1:2]
+}
+
+# Create complete matrix
+all_genes3N <- unique(unlist(lapply(vcov_list3N, rownames)))
+all_genes3U <- unique(unlist(lapply(vcov_list3U, rownames)))
+
+full_matrix3N <- matrix(0, nrow = length(all_genes3N), ncol = length(all_genes3N),
+                      dimnames = list(all_genes3N, all_genes3N))
+
+full_matrix3U <- matrix(0, nrow = length(all_genes3U), ncol = length(all_genes3U),
+                      dimnames = list(all_genes3U, all_genes3U))
+
+# Step 3: Iteratively fill the full matrix with values from the pairwise matrices
+for(mat in vcov_list3N) {
+  # Get the row and column names of the current matrix
+  genes <- rownames(mat)
+  
+  # Find the indices of these genes in the full matrix
+  indices <- match(genes, all_genes3N)
+  
+  # Fill in the corresponding values
+  full_matrix3N[indices, indices] <- mat
+}
+
+for(mat in vcov_list3U) {
+  # Get the row and column names of the current matrix
+  genes <- rownames(mat)
+  
+  # Find the indices of these genes in the full matrix
+  indices <- match(genes, all_genes3U)
+  
+  # Fill in the corresponding values
+  full_matrix3U[indices, indices] <- mat
+}
+
+nrow(tab_pl_newf)
+nrow(tab_pl_newf3)
+
+dim(full_matrixN)
+dim(full_matrix3N)
+
+```
+
+```{r}
+
+# PCA
+pca_result <- prcomp(full_matrix)
+
+pc_scores <- pca_result$x  # Principal component scores
+pc_variance <- pca_result$sdev^2  # Variance explained by each PC
+total_variance <- sum(pc_variance)
+
+percent_variance <- pc_variance / total_variance * 100
+3.804238e+01 + 1.571814e+01
+
+# Plot the body size PCA
+# Create a dataframe for ggplot
+pca_df <- data.frame(PC1 = pca_result$x[, 1], 
+                     PC2 = pca_result$x[, 2],
+                     PC3 = pca_result$x[, 3])
+
+# Plot using ggplot2
+G_pca_size <- ggplot(pca_df, aes(x = PC1, y = PC2)) +
+  geom_hline(yintercept = 0, lty = 2, color = "gray", size = 1) +
+  geom_vline(xintercept = 0, lty = 2, color = "gray", size = 1) +
+  geom_point(size = 2) +
+  theme_classic(base_size = 20) +
+  ggtitle("Major axes of G matrices", subtitle = "Adaptive body size DEGs") +
+  xlab("PC1 (32.30 %)") +
+  ylab("PC2 (12.72 %)")
+
+# Eigen approach for plotting ellipse
+# Calculate eigenvalues and eigenvectors
+eig <- eigen(full_matrix)
+
+evs <- sqrt(eig$values)
+evecs <- eig$vectors
+
+a <- evs[1]
+b <- evs[2]
+x0 <- 0
+y0 <- 0
+alpha <- atan(evecs[ , 1][2] / evecs[ , 1][1])
+theta <- seq(0, 2 * pi, length=(1000))
+
+ellipse_x <- x0 + a * cos(theta) * cos(alpha) - b * sin(theta) * sin(alpha)
+ellipse_y <- y0 + a * cos(theta) * sin(alpha) + b * sin(theta) * cos(alpha)
+
+# Line 1 along the major axis (parallel to eigenvector 1)
+line1_x <- c(x0 - a * cos(alpha), x0 + a * cos(alpha))
+line1_y <- c(y0 - a * sin(alpha), y0 + a * sin(alpha))
+
+# Line 2 along the minor axis (perpendicular to eigenvector 1)
+alpha_perpendicular <- alpha + pi/2  # Rotate by 90 degrees
+line2_x <- c(x0 - b * cos(alpha_perpendicular), x0 + b * cos(alpha_perpendicular))
+line2_y <- c(y0 - b * sin(alpha_perpendicular), y0 + b * sin(alpha_perpendicular))
+
+# Create data frames for ggplot
+ellipse_data <- data.frame(x = ellipse_x, y = ellipse_y)
+line1_data <- data.frame(x = line1_x, y = line1_y)
+line2_data <- data.frame(x = line2_x, y = line2_y)
+
+# Plotting with ggplot
+bodysize_ellipse <- ggplot() +
+  geom_path(data = line1_data, aes(x, y), color = "red", linetype = "dashed", size = 1) +
+  geom_path(data = line2_data, aes(x, y), color = "blue", linetype = "dashed", size = 1) +
+  geom_path(data = ellipse_data, aes(x, y), color = "black", size = 1.5) +
+  coord_equal() +  # Ensures equal aspect ratio
+  theme_classic(base_size = 15) +
+  scale_y_continuous(limits = c(-1,1)) +
+  scale_x_continuous(limits = c(-1,1)) +
+  labs(title = expression("Adaptive body size DEGs"),
+       x = "x", y = "y")
+
+```
+
+```{r}
+
+# Compare pairwise covariances of the adaptive body size and biomineralization matrices
+# Function to extract lower triangle (below diagonal) of a matrix
+extract_lower_triangle <- function(mat) {
+  n <- nrow(mat)
+  row <- c(1:n)
+  col <- c(1:n)
+  lower_triangle <- mat[lower.tri(mat, diag = FALSE)]
+  data.frame(row, col, lower_triangle)
+}
+
+# Extract lower triangles as data frames
+spi_N_df <- extract_lower_triangle(cov2cor(cov(full_matrixN)))
+spi_U_df <- extract_lower_triangle(cov2cor(cov(full_matrixU)))
+bod_N_df <- extract_lower_triangle(cov2cor(cov(full_matrix3N)))
+bod_U_df <- extract_lower_triangle(cov2cor(cov(full_matrix3U)))
+
+combined_df <- data.frame(
+  Trait = c(rep("Body size", nrow(bod_N_df)), 
+             rep("Biomineralization", nrow(spi_N_df)),
+            rep("Body size", nrow(bod_U_df)), 
+             rep("Biomineralization", nrow(spi_U_df))),
+  F0_env = c(rep("Non-upwelling", nrow(bod_N_df)), 
+             rep("Non-upwelling", nrow(spi_N_df)),
+            rep("Upwelling", nrow(bod_U_df)), 
+             rep("Upwelling", nrow(spi_U_df))),
+  cov = c(bod_N_df$lower_triangle, spi_N_df$lower_triangle,
+                 bod_U_df$lower_triangle, spi_U_df$lower_triangle)
+)
+
+combined_df$cov <- ifelse(combined_df$cov == "Inf", 0,
+                          ifelse(combined_df$cov == "-Inf", 0,
+                                 ifelse(is.na(combined_df$cov) == TRUE, 0,
+                                 combined_df$cov)))
+
+# Statistical test (e.g., Wilcoxon rank sum test)
+# Assuming normality for illustration; adapt as per your data characteristics
+cov_lm <- summary(lm(cov ~ F0_env + Trait + F0_env:Trait, 
+                     data = filter(combined_df, cov > -Inf & cov < Inf)))
+cov_lm
+
+# Mantel tests
+library(ape)
+
+replace_infinite_values <- function(mat) {
+  # Replace Inf with the maximum finite value in the matrix
+  mat[mat == Inf] <- 0
+  
+  # Replace -Inf with the minimum finite value in the matrix
+  mat[mat == -Inf] <- 0
+  
+  # Replace -Inf with the minimum finite value in the matrix
+
+  
+  return(mat)
+}
+
+corr_mat_N <- cov2cor(cov(full_matrixN))
+corr_mat_U <- cov2cor(cov(full_matrixU))
+corr_mat3_N <- cov2cor(cov(full_matrix3N))
+corr_mat3_U <- cov2cor(cov(full_matrix3U))
+
+# Mantel tests indicate significant differences in covariance
+bod_mantel <- mantel.test(corr_mat_N, corr_mat_U, nperm = 1e4, graph = FALSE,
+            alternative = "two.sided")
+
+spi_mantel <- mantel.test(corr_mat3_N, corr_mat3_U, nperm = 1e4, graph = FALSE,
+            alternative = "two.sided")
+
+spi_mantel
+
+bod_mantel
+
+# Is this just due to more or less genetic variation in N vs U? See with Wald test
+wilcox.test(as.vector(diag(full_matrixN)), 
+            as.vector(diag(full_matrixU)), 
+            exact = FALSE) # Significant for biomineralization
+
+wilcox.test(as.vector(diag(full_matrix3N)), 
+            as.vector(diag(full_matrix3U)), 
+            exact = FALSE) # Significant for biomineralization
+
+```
+
+
+```{r}
+ggplot(data = combined_df,
+       aes(x = cov, group = F0_env, fill = F0_env)) +
+  geom_density(alpha = 0.5) +
+  facet_wrap(~Trait)
+
+summarySE(measurevar = "cov",
+          groupvars = c("Trait","F0_env"),
+          data = na.omit(combined_df))
+
+1-(-0.01571837/-0.02256037) # 30.33% weaker negative genetic covariance under upwelling
+
+
+# Difference in covariance for body size between N vs U 44% more negative genetic covariance under non-upwelling
+-8.0383771/-2.2560326 # Upwelling made body size genetic correlations 3.56 more negative
+
+# Heatmap
+meltN <- melt(corr_mat_N)
+meltU <- melt(corr_mat_U)
+melt3N <- melt(corr_mat3_N)
+melt3U <- melt(corr_mat3_U)
+
+meltN$phenotype <- "Body size"
+meltU$phenotype <- "Body size"
+meltN$F0_env <- "Non-upwelling"
+meltU$F0_env <- "Upwelling"
+
+melt3N$phenotype <- "Biomineralization"
+melt3U$phenotype <- "Biomineralization"
+melt3N$F0_env <- "Non-upwelling"
+melt3U$F0_env <- "Upwelling"
+
+meltN <- subset(meltN, Var1 != Var2)
+meltU <- subset(meltU, Var1 != Var2)
+
+melt3N <- subset(melt3N, Var1 != Var2)
+melt3U <- subset(melt3U, Var1 != Var2)
+
+melt_all <- rbind(meltN,
+                  meltU,
+                  melt3N,
+                  melt3U
+                  )
+
+melt3 <- rbind(melt3N,
+                   melt3U)
+
+ggplot(data = melt_all, aes(x=Var1, y=Var2, fill=value)) + 
+  geom_tile() +
+  scale_fill_viridis_c() +
+  coord_fixed() +
+  facet_wrap(~F0_env) +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        axis.line = element_blank(),
+        axis.title = element_blank()) +
+  labs()
+
+# With clustering
+library(cluster)
+library(reshape2)
+
+dist_matrixN <- as.dist(1 - corr_mat_N)
+dist_matrixU <- as.dist(1 - corr_mat_U)
+dist_matrix3N <- as.dist(1 - corr_mat3_N)
+dist_matrix3U <- as.dist(1 - corr_mat3_U)
+
+# Perform hierarchical clustering
+hcN <- hclust(dist_matrixN, method = "complete")
+hcU <- hclust(dist_matrixU, method = "complete")
+hc3N <- hclust(dist_matrix3N, method = "complete")
+hc3U <- hclust(dist_matrix3U, method = "complete")
+
+# Plot clusters
+plot(hcN)
+plot(hcU)
+plot(hc3N)
+plot(hc3U)
+
+clustersN <- max(cutree(hcN, h = 0.5)) # Adjust h as necessary
+clustersU <- max(cutree(hcU, h = 0.5)) # Adjust h as necessary
+clusters3N <- max(cutree(hc3N, h = 0.5)) # Adjust h as necessary
+clusters3U <- max(cutree(hc3U, h = 0.5)) # Adjust h as necessary
+
+# Order variables based on clustering
+orderN <- hcN$order
+orderU <- hcU$order
+order3N <- hc3N$order
+order3U <- hc3U$order
+
+# Reorder covariance matrices based on clustering order
+full_matrixN_ordered <- corr_mat_N[orderN, orderN]
+full_matrixU_ordered <- corr_mat_U[orderN, orderN]
+full_matrix3N_ordered <- corr_mat3_N[order3N, order3N]
+full_matrix3U_ordered <- corr_mat3_U[order3N, order3N]
+
+meltN_ordered <- melt(full_matrixN_ordered)
+meltU_ordered <- melt(full_matrixU_ordered)
+melt3N_ordered <- melt(full_matrix3N_ordered)
+melt3U_ordered <- melt(full_matrix3U_ordered)
+
+# Add phenotype labels
+meltN_ordered$phenotype <- "Body size"
+meltU_ordered$phenotype <- "Body size"
+melt3N_ordered$phenotype <- "Biomineralization"
+melt3U_ordered$phenotype <- "Biomineralization"
+meltN_ordered$F0_env <- "Parental non-upwelling"
+meltU_ordered$F0_env <- "Parental upwelling"
+melt3N_ordered$F0_env <- "Parental non-upwelling"
+melt3U_ordered$F0_env <- "Parental upwelling"
+
+bmN <- nrow(full_matrixN_ordered)
+bmU <- nrow(full_matrixU_ordered)
+smN <- nrow(full_matrix3N_ordered)
+smU <- nrow(full_matrix3U_ordered)
+
+# Subset and combine melted data
+melt_all_ordered <- rbind(
+  rbind(
+  subset(meltN_ordered, Var1 != Var2),
+  subset(meltU_ordered, Var1 != Var2)),
+  rbind(
+  subset(melt3N_ordered, Var1 != Var2),
+  subset(melt3U_ordered, Var1 != Var2)))
+
+cov_heatmap <- ggplot(data = melt_all_ordered, 
+       aes(x = as.factor(Var1),
+           y = as.factor(Var2),
+           fill = value)) + 
+  geom_tile() +
+  scale_fill_gradient2(midpoint = 0, 
+                       low = "#0000FF", mid = "#FFFFFF", high = "#FF0000") +  
+  coord_fixed() +
+  facet_wrap(~F0_env) +
+  theme_classic(base_size = 20) +
+  theme(strip.background = element_blank()) +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        axis.line = element_blank(),
+        axis.title = element_blank()) +
+  labs(fill = "Genetic correlation")
+
+cov_heatmap
+
+# Export Fig 5 as png
+png("cov_heatmap.png", units = "in", width = 12, 
+    height = 12, 
+    res = 600)
+
+cov_heatmap
+
+# Create regression of upwelling cov vs. non-upwelling cov
+melt3N_ordered$pair <- paste(melt3N_ordered$Var1, 
+                             melt3N_ordered$Var2, 
+                             sep = "_")
+
+melt3U_ordered$pair <- paste(melt3U_ordered$Var1, 
+                             melt3U_ordered$Var2, 
+                             sep = "_")
+
+meltN_ordered$pair <- paste(meltN_ordered$Var1, 
+                            meltN_ordered$Var2, 
+                            sep = "_")
+
+meltU_ordered$pair <- paste(meltU_ordered$Var1, 
+                            meltU_ordered$Var2, 
+                            sep = "_")
+
+cov_pair_df <- rbind(
+  merge(
+    data.frame(
+      pair = melt3N_ordered$pair,
+      N_cov = melt3N_ordered$value,
+      phenotype = melt3N_ordered$phenotype),
+    data.frame(
+      pair = melt3U_ordered$pair,
+      U_cov = melt3U_ordered$value),
+    by = "pair"),
+  merge(
+    data.frame(
+      pair = meltN_ordered$pair,
+      N_cov = meltN_ordered$value,
+      phenotype = meltN_ordered$phenotype),
+    data.frame(
+      pair = meltU_ordered$pair,
+      U_cov = meltU_ordered$value),
+    by = "pair"))
+
+melt3N$pair <- paste(melt3N$Var1, 
+                             melt3N$Var2, 
+                             sep = "_")
+
+melt3U$pair <- paste(melt3U$Var1, 
+                             melt3U$Var2, 
+                             sep = "_")
+
+cov3_df <- merge(
+    data.frame(
+      pair = melt3N$pair,
+      N_cov = melt3N$value),
+    data.frame(
+      pair = melt3U$pair,
+      U_cov = melt3U$value),
+    by = "pair")
+
+# Plot regression
+
+cov_pair_df$color <- ifelse(cov_pair_df$N_cov > 0 & cov_pair_df$U_cov < 0, "Red",
+                            ifelse(cov_pair_df$N_cov < 0 & cov_pair_df$U_cov > 0, "Blue", "Gray"))
+
+cov_rand_df$color <- ifelse(cov_rand_df$df1_corr > 0 & cov_rand_df$df2_corr < 0, "Red",
+                            ifelse(cov_rand_df$df1_corr < 0 & cov_rand_df$df2_corr > 0, "Blue", "Gray"))
+
+cov_pair_df$phenotype <- factor(cov_pair_df$phenotype, levels = c("Body size", "Biomineralization"))
+
+cov_pair <- ggplot(data = cov_pair_df,
+       aes(x = N_cov, y = U_cov, group = phenotype, color = color, size = color)) +
+  geom_hline(yintercept = 0, lty = 2, color = "gray", size = 1) +
+  geom_vline(xintercept = 0, lty = 2, color = "gray", size = 1) +
+  geom_point(alpha = .05) +
+  facet_wrap(~phenotype) +
+  theme_classic(base_size = 20) +
+  theme(strip.background = element_blank()) +
+  scale_color_manual(values = c("red", "black", "blue")) +
+  guides(color = "none", size = "none") +
+  scale_size_manual(values = c(1,.25,1)) +
+  scale_x_continuous(limits = c(-1,1)) +
+  scale_y_continuous(limits = c(-1,1)) +
+  labs(x = "Parental non-upwelling correlation", y = "Parental upwelling correlation")
+
+cov_pair
+
+table(cov_pair_df$phenotype)
+
+cov_rand <- ggplot(data = cov_rand_df,
+       aes(x = df1_corr, y = df2_corr, color = color, size = color)) +
+  geom_hline(yintercept = 0, lty = 2, color = "gray", linewidth = 1) +
+  geom_vline(xintercept = 0, lty = 2, color = "gray", linewidth = 1) +
+  geom_point(alpha = .05) +
+  theme_classic(base_size = 20) +
+  theme(strip.background = element_blank()) +
+  scale_color_manual(values = c("red", "black", "blue")) +
+  guides(color = "none", size = "none") +
+  scale_size_manual(values = c(1,.25,1)) +
+  scale_x_continuous(limits = c(-1,1)) +
+  scale_y_continuous(limits = c(-1,1)) +
+  labs(x = "Partition 1", y = "Partition 2")
+
+```
+
+Results from HB chi-square test of difference in enrichment of upwelling-positive correlations vs upwelling-negative correlations for body size
+
+n_UposNneg = 27804
+n_UnegNpos = 18734
+
+X-squared = 1767.7, df = 1, p-value < 2.2e-16
+
+For biomineralization
+
+X-squared = 135.51, df = 1, p-value < 2.2e-16
+
+Results from HB chi-square test of difference in enrichment in random partitions of the matrix
+
+n_up_rand = 19778
+n_down_rand = 22094
+
+X-squared = 128.1, df = 1, p-value < 2.2e-16
+
+```{r}
+
+1 - (22094 - 19778) / (27804 - 18734)
+
+1767.7 - 128.1
+
+128.1/1767.7
+
+128.1/135.51
+
+# PCA
+pca_result3 <- prcomp(full_matrix3)
+
+pc_scores3 <- pca_result3$x  # Principal component scores
+pc_variance3 <- pca_result3$sdev^2  # Variance explained by each PC
+total_variance3 <- sum(pc_variance3)
+
+percent_variance3 <- pc_variance3 / total_variance3 * 100
+3.922532e+01 + 1.956154e+01
+
+# Create a dataframe for ggplot
+pca_df3 <- data.frame(PC1 = pca_result3$x[, 1], 
+                      PC2 = pca_result3$x[, 2],
+                      PC3 = pca_result3$x[, 3])
+
+# Plot using ggplot2
+G_pca_biomin <- ggplot(pca_df3, aes(x = PC1, y = PC2)) +
+  geom_hline(yintercept = 0, lty = 2, color = "gray", size = 1) +
+  geom_vline(xintercept = 0, lty = 2, color = "gray", size = 1) +
+  geom_point(size = 2) +
+  theme_classic(base_size = 20) +
+  ggtitle("", subtitle = "Adaptive biomineralization DEGs") +
+  xlab("PC1 (36.46 %)" ) +
+  ylab("PC2 (15.59 %)")
+
+G_pca_biomin
+
+# Eigen approach for plotting ellipse
+# Calculate eigenvalues and eigenvectors
+eig3 <- eigen(full_matrix3)
+
+evs3 <- sqrt(eig3$values)
+evecs3 <- eig3$vectors
+
+a3 <- evs3[1]
+b3 <- evs3[2]
+x03 <- 0
+y03 <- 0
+alpha3 <- atan(evecs3[ , 1][2] / evecs3[ , 1][1])
+theta3 <- seq(0, 2 * pi, length=(1000))
+
+ellipse_x3 <- x03 + a3 * cos(theta3) * cos(alpha3) - b3 * sin(theta3) * sin(alpha3)
+ellipse_y3 <- y03 + a3 * cos(theta3) * sin(alpha3) + b3 * sin(theta3) * cos(alpha3)
+
+# Line 1 along the major axis (parallel to eigenvector 1)
+line1_x3 <- c(x03 - a3 * cos(alpha3), x03 + a3 * cos(alpha3))
+line1_y3 <- c(y03 - a3 * sin(alpha3), y03 + a3 * sin(alpha3))
+
+# Line 2 along the minor axis (perpendicular to eigenvector 1)
+alpha_perpendicular3 <- alpha3 + pi/2  # Rotate by 90 degrees
+line2_x3 <- c(x03 - b3 * cos(alpha_perpendicular3), x03 + b3 * cos(alpha_perpendicular3))
+line2_y3 <- c(y03 - b3 * sin(alpha_perpendicular3), y03 + b3 * sin(alpha_perpendicular3))
+
+# Create data frames for ggplot
+ellipse_data3 <- data.frame(x = ellipse_x3, y = ellipse_y3)
+line1_data3 <- data.frame(x = line1_x3, y = line1_y3)
+line2_data3 <- data.frame(x = line2_x3, y = line2_y3)
+
+# Plotting with ggplot
+biomin_ellipse <- ggplot() +
+  geom_path(data = line1_data3, aes(x, y), color = "red", linetype = "dashed", size = 1) +
+  geom_path(data = line2_data3, aes(x, y), color = "blue", linetype = "dashed", size = 1) +
+  geom_path(data = ellipse_data3, aes(x, y), color = "black", size = 1.5) +
+  coord_equal() +  # Ensures equal aspect ratio
+  theme_classic(base_size = 15) +
+  theme(axis.text.y = element_blank(),
+        axis.line.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.y = element_blank()) +
+  scale_y_continuous(limits = c(-1,1)) +
+  scale_x_continuous(limits = c(-1,1)) +
+  labs(title = expression("Adaptive biomineralization DEGs"),
+       x = "x", y = "y")
+
+ellipse_panel <- ggarrange(bodysize_ellipse, biomin_ellipse,
+                   labels = c("", ""),
+                   widths = c(1, 1),
+                   ncol = 2, nrow = 1, align = "hv")
+
+ellipse_panel
+
+# Export ellipse fig
+png("~/Documents/GitHub/Cross_pHox/ellipse_panel.png", units = "in", width = 12, 
+    height = 6, 
+    res = 600)
+
+ellipse_panel
+
+# Create G matrix figure panel
+g_panel <- ggarrange(cov_heatmap, cov_pair,
+                     labels = c("A", "B"),
+                     heights = c(1, 1),
+                     ncol = 1, nrow = 2)
+
+g_panel
+
+# Export G matrix panel as png
+png("~/Documents/GitHub/Cross_pHox/g_panel.png", units = "in", width = 12, 
+    height = 12, 
+    res = 600)
+
+g_panel
+
+```
+
+```{r}
+
+# Step 3: Iteratively fill the full matrix with values from the pairwise matrices
+for(mat in vcov_list3) {
+  # Get the row and column names of the current matrix
+  genes <- rownames(mat)
+  
+  # Find the indices of these genes in the full matrix
+  indices <- match(genes, all_genes3)
+  
+  # Fill in the corresponding values
+  full_matrix3[indices, indices] <- mat
+}
+
+eig3 <- eigen(full_matrix3)
+eigenvectors3 <- eig3$vectors
+eigenvalues3 <- eig3$values
+
+as.data.frame(eig3$vectors)
+
+# Function to plot ellipse
+plot_ellipse <- function(center = c(0, 0), scale = c(1, 1), rotation = 0, ...){
+  t <- seq(0, 2*pi, length.out = 100)
+  ellipse <- tibble::tibble(
+    x = center[1] + scale[1] * cos(t) * cos(rotation) - scale[2] * sin(t) * sin(rotation),
+    y = center[2] + scale[1] * cos(t) * sin(rotation) + scale[2] * sin(t) * cos(rotation)
+  )
+  
+  ggplot(ellipse, aes(x = x, y = y)) + 
+    geom_path(...) + 
+    coord_fixed(ratio = 1) +
+    theme_minimal()
+}
+
+# Plotting the ellipse
+# Scaling by the square root of the eigenvalues and rotating by the angle of the first eigenvector
+angle3 <- atan2(eigenvectors3[2,1], eigenvectors3[1,1])
+plot_ellipse(scale = sqrt(eigenvalues3), rotation = angle3)
+
+# How many >1.0 eigenvalues are there?
+count(eigenvalues3 > 1.0) # 4
+
+# How much variance is explained by V1 and V2? Sum is 38.82
+(max(eigenvalues3) / sum(eigenvalues3)) * 100 # 23.99 %
+((eigenvalues3[2]) / sum(eigenvalues3)) * 100 # 10.29 %
+((eigenvalues3[3]) / sum(eigenvalues3)) * 100 # 8.49 %
+((eigenvalues3[4]) / sum(eigenvalues3)) * 100 # 6.30 %
+((eigenvalues3[5]) / sum(eigenvalues3)) * 100 # 5.84 %
+
+
+23.99 + 10.29 + 8.49 + 6.30
+
+library(gridExtra)
+library(ellipse)
+library(tibble)
+
+# Plot ellipses
+# Order by eigenvalues
+ordered_indices <- order(eigenvalues, decreasing = TRUE)
+top4_indices <- ordered_indices[1:4]
+top4_values <- eigenvalues[top4_indices]
+top4_vectors <- eigenvectors[, top4_indices]
+
+# Function to plot ellipse based on eigenvalues and eigenvectors
+
+# Reference code for plotting ellipse
+# Reference code for plotting ellipse
+# Reference code for plotting ellipse
+plot_ellipse <- function(center = c(0, 0), scale = c(1, 1), rotation = 0, xlim = c(-3, 3), ylim = c(-3, 3), eig_x = 1, eig_y = 2, ...) {
+  t <- seq(0, 2 * pi, length.out = 100)
+  ellipse <- tibble::tibble(
+    x = center[1] + scale[1] * cos(t) * cos(rotation) - scale[2] * sin(t) * sin(rotation),
+    y = center[2] + scale[1] * cos(t) * sin(rotation) + scale[2] * sin(t) * cos(rotation)
+  )
+  
+  # Calculate endpoints for perpendicular lines
+  line_data <- data.frame(
+    x = c(center[1] - scale[1] * cos(rotation), center[1] + scale[1] * cos(rotation), center[1], center[1]),
+    y = c(center[2] - scale[1] * sin(rotation), center[2] + scale[1] * sin(rotation), center[2], center[2])
+  )
+  
+  # Calculate rotation angle for perpendicular lines
+  angle_perpendicular <- rotation + pi/2
+  
+  # Length of the lines (half of the ellipse lengths)
+  line_length <- sqrt(scale[1]^2 + scale[2]^2) / 2
+  
+  # Calculate endpoints of perpendicular lines
+  line_data$x[3] <- center[1] - line_length * cos(angle_perpendicular)
+  line_data$y[3] <- center[2] - line_length * sin(angle_perpendicular)
+  line_data$x[4] <- center[1] + line_length * cos(angle_perpendicular)
+  line_data$y[4] <- center[2] + line_length * sin(angle_perpendicular)
+  
+  ggplot(ellipse, aes(x = x, y = y)) + 
+    geom_segment(data = line_data, aes(x = x[1], y = y[1], xend = x[2], yend = y[2]), color = "red", linetype = "solid") +
+    geom_segment(data = line_data, aes(x = x[3], y = y[3], xend = x[4], yend = y[4]), color = "red", linetype = "solid") +
+    geom_path(..., size = .5) + 
+    coord_fixed(ratio = 1, xlim = xlim, ylim = ylim) +
+    theme_minimal() +
+    theme(axis.title.x = element_text(size = 12, face = "bold"),
+          axis.title.y = element_text(size = 12, face = "bold"),
+          axis.text = element_text(size = 10)) +
+    xlab(paste("Eigen", eig_x)) + ylab(paste("Eigen", eig_y))
+}
+
+# Find the maximum range for x and y axes
+max_range <- max(sqrt(top4_values))
+
+# Initialize an empty list to store the plots
+plot_list <- list()
+
+# Loop through all combinations of the top four axes
+for (i in 1:4) {
+  for (j in 1:4) {
+    if (i != j) {
+      eig_val1 <- top4_values[i]
+      eig_val2 <- top4_values[j]
+      eig_vec1 <- top4_vectors[, i]
+      eig_vec2 <- top4_vectors[, j]
+      
+      if (eig_val1 < eig_val2) {
+        eig_val1 <- top4_values[j]
+        eig_val2 <- top4_values[i]
+        eig_vec1 <- top4_vectors[, j]
+        eig_vec2 <- top4_vectors[, i]
+      }
+      
+      # Calculate angle from the largest eigenvector
+      angle <- atan2(eig_vec1[2], eig_vec1[1])
+      
+      # Plot the ellipse
+      plot_title <- paste("Axis", i, "vs Axis", j)
+      plot_list[[i + (j - 1) * 4]] <- plot_ellipse(scale = c(sqrt(eig_val1), sqrt(eig_val2)), rotation = angle, xlim = c(-max_range, max_range), ylim = c(-max_range, max_range), eig_x = i, eig_y = j, color = "blue")
+    } else {
+      # Add an empty plot for the diagonal
+      plot_list[[i + (j - 1) * 4]] <- ggplot() + theme_void()
+    }
+  }
+}
+
+
+# Arrange plots in a grid
+grid_plots <- arrangeGrob(grobs = plot_list, nrow = 4, ncol = 4)
+
+# Print the grid of plots
+grid.arrange(grid_plots)
+
+```
+
+Address how many adaptive/maladaptive DEGs are heritable
+
+```{r}
+
+colnames(lme4qtl_pl_evol_df)[1] <- "h2"
+
+## Adaptive plasticity of body size
+# How many dev DEGs have h2 >= 0.1?
+nrow(filter(lme4qtl_pl_evol_df, 
+            h2 >= 0.2 &
+              geneid %in% row.names(dev_QLFT_cutoff_df))) /
+  nrow(dev_QLFT_cutoff_df)
+
+### Body length
+lme4qtl_pl_evol_df$geneid <- row.names(lme4qtl_pl_evol_df)
+
+# What is the mean IA and sd of DE? 0.30 +/- 0.16
+filter(lme4qtl_pl_evol_df, 
+            h2 >= 0.2 &
+              geneid %in% row.names(dev_QLFT_cutoff_df)) %>% 
+  mutate(mean = mean(h2))
+
+filter(lme4qtl_pl_evol_df, 
+            h2 >= 0.2 &
+              geneid %in% row.names(dev_QLFT_cutoff_df)) %>% 
+  mutate(sd = sd(h2))
+
+# How many adaptive DEGs are heritable?
+bod_ad_geneids <- filter(sig_dev_meth_dfdb, X2.5. < 0)
+
+nrow(filter(lme4qtl_pl_evol_df, 
+            h2 >= 0.2 &
+              geneid %in% row.names(dev_QLFT_cutoff_df) &
+              geneid %in% bod_ad_geneids$column_label)) /
+  nrow(filter(lme4qtl_pl_evol_df, geneid %in% row.names(dev_QLFT_cutoff_df) &
+              geneid %in% bod_ad_geneids$column_label))
+
+nrow(filter(lme4qtl_pl_evol_df, 
+            h2 >= 0.2 &
+              geneid %in% bod_ad_geneids$column_label)) /
+  nrow(filter(lme4qtl_pl_evol_df, geneid %in% row.names(dev_QLFT_cutoff_df)))
+
+# What is the mean IA and sd of DE associated with adaptive body size plasticity? 0.30 +/- 0.16
+filter(lme4qtl_pl_evol_df, geneid %in% bod_ad_geneids$column_label) %>% 
+  mutate(mean = mean(h2))
+
+filter(lme4qtl_pl_evol_df, 
+              geneid %in% bod_ad_geneids$column_label) %>% 
+  mutate(sd = sd(h2))
+
+## Maladaptive plasticity of body size
+# How much DE is body size maladaptive and heritable?
+bod_mal_geneids <- filter(sig_dev_meth_dfdb, X2.5. > 0)
+
+nrow(filter(lme4qtl_pl_evol_df, 
+            h2 >= 0.1 &
+              geneid %in% row.names(dev_QLFT_cutoff_df) &
+              geneid %in% bod_mal_geneids$column_label)) /
+  nrow(filter(lme4qtl_pl_evol_df, geneid %in% row.names(dev_QLFT_cutoff_df)))
+
+# What is the mean IA and sd of DE associated with maladaptive body size plasticity?
+filter(lme4qtl_pl_evol_df, 
+            h2 >= 0.1 &
+              geneid %in% row.names(dev_QLFT_cutoff_df) &
+              geneid %in% bod_mal_geneids) %>% 
+  mutate(mean = mean(h2))
+
+filter(lme4qtl_pl_evol_df, 
+            h2 >= 0.1 &
+              geneid %in% row.names(dev_QLFT_cutoff_df) &
+              geneid %in% bod_mal_geneids$column_label) %>% 
+  mutate(sd = sd(h2))
+
+### Biomineralization
+
+# How many adaptive DEGs are heritable?
+spi_ad_geneids <- filter(sig_dev_meth_dfdm, X2.5. > 0)
+
+nrow(filter(lme4qtl_pl_evol_df, 
+            h2 >= 0.1 &
+              geneid %in% row.names(dev_QLFT_cutoff_df) &
+              geneid %in% spi_ad_geneids$column_label)) /
+  nrow(filter(lme4qtl_pl_evol_df, geneid %in% row.names(dev_QLFT_cutoff_df)))
+
+nrow(filter(lme4qtl_pl_evol_df, 
+            h2 >= 0.1 &
+              geneid %in% row.names(dev_QLFT_cutoff_df) &
+              geneid %in% spi_ad_geneids$column_label)) /
+  nrow(filter(lme4qtl_pl_evol_df, geneid %in% row.names(dev_QLFT_cutoff_df) &
+              geneid %in% spi_ad_geneids$column_label))
+
+nrow(filter(lme4qtl_pl_evol_df, 
+            h2 >= 0.2 &
+              geneid %in% spi_ad_geneids)) /
+  length(spi_ad_geneids)
+
+# What is the mean IA and sd of DE associated with adaptive biomineralization plasticity?
+filter(lme4qtl_pl_evol_df, 
+            h2 >= 0.1 &
+              geneid %in% row.names(dev_QLFT_cutoff_df) &
+              geneid %in% spi_ad_geneids$column_label) %>% 
+  mutate(mean = mean(h2))
+
+filter(lme4qtl_pl_evol_df, 
+            h2 >= 0.1 &
+              geneid %in% row.names(dev_QLFT_cutoff_df) &
+              geneid %in% spi_ad_geneids$column_label) %>% 
+  mutate(mean = sd(h2))
+
+## Maladaptive plasticity of body size
+# How much DE is body size maladaptive and heritable?
+bod_mal_geneids <- filter(sig_dev_meth_dfdb, X2.5. > 0)
+spi_mal_geneids <- filter(sig_dev_meth_dfdm, X2.5. < 0)
+
+
+nrow(filter(lme4qtl_pl_evol_df, 
+            h2 >= 0.2 &
+              geneid %in% bod_mal_geneids$column_label)) /
+  nrow(filter(lme4qtl_pl_evol_df, geneid %in% row.names(dev_QLFT_cutoff_df)))
+
+# What is the mean IA and sd of DE associated with maladaptive body size plasticity?
+filter(lme4qtl_pl_evol_df, 
+              geneid %in% bod_mal_geneids$column_label) %>% 
+  mutate(mean = mean(h2))
+
+filter(lme4qtl_pl_evol_df, 
+              geneid %in% bod_mal_geneids$column_label) %>% 
+  mutate(sd = sd(h2))
+
+# What percent of sig maladaptive DEGs are heritable?
+nrow(filter(lme4qtl_pl_evol_df, 
+            h2 >= 0.2 &
+              geneid %in% bod_mal_geneids$column_label)) /
+  nrow(filter(lme4qtl_pl_evol_df))
+
+# What is the mean IA and sd of DE associated with adaptive biomineralization plasticity?
+filter(lme4qtl_pl_evol_df, 
+            h2 >= 0.2 &
+              geneid %in% row.names(dev_QLFT_cutoff_df) &
+              geneid %in% spi_ad_geneids) %>% 
+  mutate(mean = mean(h2))
+
+filter(lme4qtl_pl_evol_df, 
+            h2 >= 0.2 &
+              geneid %in% row.names(dev_QLFT_cutoff_df) &
+              geneid %in% spi_ad_geneids) %>% 
+  mutate(mean = sd(h2))
+
+nrow(filter(lme4qtl_pl_evol_df, 
+            h2 >= 0.2 &
+              geneid %in% row.names(dev_QLFT_cutoff_df) &
+              geneid %in% spi_ad_geneids)) /
+  nrow(dev_QLFT_cutoff_df)
+
+nrow(filter(lme4qtl_pl_evol_df, 
+            h2 >= 0.2 &
+              geneid %in% row.names(dev_QLFT_cutoff_df) &
+              geneid %in% spi_mal_geneids)) /
+  nrow(dev_QLFT_cutoff_df)
+
+
+
+```
+
+```{r}
+
+# Plot the scatter plot with marginal histograms
+Fig_4A <- ggMarginal(pl_exp_corr, type = "histogram", fill = "grey", color = NA)
+Fig_4A
+
+# Compare differences in GE vs DE heritability
+lme4qtl_exp_evol_df$Trait <- "GE"
+lme4qtl_pl_evol_df$Trait <- "DE"
+
+lme4qtl_exp_evol_df$geneid <- row.names(lme4qtl_exp_evol_df)
+lme4qtl_pl_evol_df$geneid <- row.names(lme4qtl_pl_evol_df)
+
+colnames(lme4qtl_exp_evol_df) <- c("IA", "geneid", "Trait")
+colnames(lme4qtl_pl_evol_df) <- c("IA", "geneid", "Trait")
+
+GE_DE_IA_df <- rbind(lme4qtl_exp_evol_df, lme4qtl_pl_evol_df[,-c(4)])
+
+GE_DE_IA_df$IA_beta <- GE_DE_IA_df$IA + 0.000001
+
+library(betareg)
+
+GE_DE_IA_glm <- glm(IA_beta ~ Trait,
+                       data = GE_DE_IA_df)
+
+# GE is significantly less heritable than its plasticity
+summary(GE_DE_IA_glm)
+
+## Plot and model associations between DE's heritability and fitness effect
+# Create df of pl h2 and abnorm fitness effect per gene
+plh2_v_abnorm <- merge(ind_df, lme4qtl_pl_evol_df, by = "geneid")
+
+ggplot(data = plh2_v_abnorm,
+       aes(x = fit_eff, 
+           y = IA)) +
+  #geom_point(size = 0.5, color = "black") +
+  geom_smooth(method = "loess", alpha = 0.25) +
+  theme_classic(base_rect_size = 0) +
+  labs(x = "Fitness effect of DE (abnormality)", y = "DE IA")
+
+plh2_v_spi <- merge(ind_dfm, lme4qtl_pl_evol_df, by = "geneid")
+
+ggplot(data = plh2_v_spi,
+       aes(x = fit_eff, 
+           y = IA)) +
+  #geom_point(size = 0.5, color = "black") +
+  geom_smooth(method = "loess", alpha = 0.25) +
+  theme_classic(base_rect_size = 0) +
+  labs(x = "Fitness effect of DE (spicule length)", y = "DE IA")
+
+plh2_v_bod <- merge(ind_dfb, lme4qtl_pl_evol_df, by = "geneid")
+
+ggplot(data = plh2_v_bod,
+       aes(x = -1*fit_eff, 
+           y = IA)) +
+  #geom_point(size = 0.5, color = "black") +
+  geom_smooth(method = "loess", alpha = 0.25) +
+  theme_classic(base_rect_size = 0) +
+  labs(x = "Fitness effect of DE (body size)", y = "DE IA")
+  
+## Remake plots but filter for significant fitness effects
+ggplot(data = filter(plh2_v_abnorm, geneid %in% sig_dev_meth_dfd$column_label),
+       aes(x = abs(fit_eff), 
+           y = IA)) +
+  geom_point(size = 1, color = "black") +
+  geom_smooth(method = "loess", alpha = 0.25) +
+  theme_classic(base_rect_size = 0) +
+  facet_wrap(~Dir) +
+  labs(x = "Fitness effect of DE (abnormality)", y = "DE IA")
+
+ggplot(data = filter(plh2_v_spi, geneid %in% sig_dev_meth_dfdm$column_label),
+       aes(x = abs(fit_eff), 
+           y = IA)) +
+  geom_point(size = 1, color = "black") +
+  geom_smooth(method = "lm", alpha = 0.25) +
+  theme_classic(base_rect_size = 0) +
+  facet_wrap(~Dir) +
+  labs(x = "Fitness effect of DE (spicule length)", y = "DE IA")
+
+ggplot(data = filter(plh2_v_bod, geneid %in% sig_dev_meth_dfdb$column_label),
+       aes(x = abs(fit_eff), 
+           y = IA)) +
+  geom_point(size = 1, color = "black") +
+  geom_smooth(method = "lm", alpha = 0.25) +
+  theme_classic(base_rect_size = 0) +
+  labs(x = "Fitness effect of DE (body size)", y = "DE IA")
+
+# Density plots of evolvability
+ggplot(data = filter(plh2_v_abnorm, geneid %in% sig_dev_meth_dfd$column_label),
+       aes(y = IA,
+           group = Dir, fill = Dir, x = Dir)) +
+  geom_boxplot() +
+  theme_classic() +
+  labs(y = expression("Differential Expression " ~ italic(I[A])),
+       x = "Abnormality effect")
+
+ggplot(data = filter(plh2_v_spi, geneid %in% sig_dev_meth_dfdm$column_label),
+       aes(y = IA,
+           group = Dir, fill = Dir, x = Dir)) +
+  geom_boxplot() +
+  theme_classic() +
+  labs(y = expression("Differential Expression " ~ italic(I[A])),
+       x = "Spicule effect")
+
+Fig5A <- ggplot(data = filter(plh2_v_bod, geneid %in% sig_dev_meth_dfdb$column_label),
+       aes(y = IA,
+           group = Dir, fill = Dir, x = Dir)) +
+  geom_boxplot() +
+  theme_classic() +
+  scale_fill_manual(values = c("salmon1", "royalblue"), guide = "none") +
+  labs(y = expression("Differential Expression " ~ italic(I[A])),
+       x = "Body size effect")
+
+Fig5A
+  
+```
+
+Perform binomial logistic regression to test for differences in heritability of DE across trait types and direction of plasticity
+
+```{r}
+
+## Create df for test
+# First, create binary heritabiliy value
+lme4qtl_pl_evol_df$herit_bi <- ifelse(
+  lme4qtl_pl_evol_df$`unlist(bind_rows(evol_pl, .id = "column_label"))` >= 0.2,
+  1, 0)
+
+# Add continuous and categorical body size plasticity effect values
+bi_log_df <- merge(lme4qtl_pl_evol_df,
+                   data.frame(spi_ad = plh2_v_spi$fit_eff,
+                              spi_ad_cat = ifelse(
+                                plh2_v_spi$ci_2.5 > 0 & plh2_v_spi$ci_97.5 > 0, 1,
+                                ifelse(plh2_v_spi$ci_2.5 < 0 & plh2_v_spi$ci_97.5 < 0, -1, 0)),
+                              bod_ad = -1*plh2_v_bod$fit_eff,
+                              bod_ad_cat = ifelse(
+                                plh2_v_bod$ci_2.5 > 0 & plh2_v_bod$ci_97.5 > 0, -1,
+                                ifelse(plh2_v_bod$ci_2.5 < 0 & plh2_v_bod$ci_97.5 < 0, 1, 0)),
+                              geneid = plh2_v_bod$geneid),
+                   by = "geneid")
+
+bi_log_df$DE_bi <- ifelse(bi_log_df$geneid %in% row.names(dev_QLFT_cutoff_df),
+                          1, 0)
+
+# Perform logistic regression
+
+# Convert logistic regression to linear model w/ continuous predictors
+bi_log_df$h2_beta <- bi_log_df$h2 +
+  0.000001
+
+library(betareg)
+
+h2_betareg <- betareg(h2_beta ~ as.factor(DE_bi) + poly(bod_ad,2) + poly(spi_ad,2) +
+                        as.factor(DE_bi):poly(spi_ad,2) + as.factor(DE_bi):poly(spi_ad,2),
+                      link = "logit",
+                      data = bi_log_df)
+
+summary(h2_betareg)
+
+h2_lm <- lm(h2 ~ as.factor(DE_bi) + poly(bod_ad,2) + poly(spi_ad,2) +
+                        as.factor(DE_bi):poly(spi_ad,2) + as.factor(DE_bi):poly(spi_ad,2),
+                      data = bi_log_df)
+
+summary(h2_lm)
+
+ggplot(data = bi_log_df,
+       aes(x = bod_ad*-1, y = (IA_beta - 0.000001))) +
+  geom_point(alpha = 0.25, size = .5) +
+  geom_smooth() +
+  facet_wrap(~DE_bi) +
+  theme_classic()
+
+## Plot Fig 4B
+# Create the ggplot with facet_wrap
+df_4B <- rbind(
+  data.frame(geneid = bi_log_df$geneid,
+             herit_bi = bi_log_df$herit_bi,
+             p_eff = scale(bi_log_df$spi_ad),
+             Trait = "Biomineralization"),
+  data.frame(geneid = bi_log_df$geneid,
+             herit_bi = bi_log_df$herit_bi,
+             p_eff = scale(bi_log_df$bod_ad),
+             Trait = "Body size"))
+
+df_4B$fit_landscape <- ifelse(df_4B$Trait == "Biomineralization", 
+                              (df_4B$p_eff * 0.40), 
+                              (df_4B$p_eff * 0.13))
+
+df_4B$Trait = factor(df_4B$Trait, levels=c('Body size','Biomineralization'))
+
+
+Fig4B <- ggplot(data = df_4B,
+  aes(x = p_eff, y = herit_bi, group = Trait)) +
+  geom_rect(aes(ymin = 0, ymax = 1.0,
+                xmin = (p_eff-1.1), xmax = (p_eff+1.1),
+                fill = fit_landscape), alpha = 1) +
+  geom_smooth( method = "glm", 
+               method.args = list(family = "binomial"),
+              fullrange = TRUE, color = "white", fill = "white") +
+  theme_classic(base_size = 20, base_rect_size = 0) +
+  theme(legend.position = "top") +
+  scale_fill_gradient(low = "skyblue", high = "red") +
+  facet_wrap(~Trait) +
+  labs(x = "Effect of DE on adaptive phenotypic plasticity",
+       y = "Probability of DE heritability",
+       fill = "Associated fitness") +
+  coord_cartesian(ylim=c(0, 1.0)) 
+
+Fig4B
+
+# Create Fig 4
+Fig4 <- ggarrange(Fig_4A, Fig4B, 
+                   labels = c("A", "B"),
+                   heights = c(1, 1),
+                   widths = c(1, .5),
+                   ncol = 1, nrow = 2, align = "v")
+
+Fig4
+
+# Export Fig 5 as png
+png("~/Documents/GitHub/Cross_pHox/Fig4.png", units = "in", width = 7, 
+    height = 12, 
+    res = 600)
+
+Fig4
+
+# Create fig 3 for poster
+Fig3_post <- ggplot(data = df_4B,
+  aes(x = p_eff, y = herit_bi, group = Trait)) +
+  geom_rect(aes(ymin = .325, ymax = .825,
+                xmin = (p_eff-1.2), xmax = (p_eff+1.2),
+                fill = fit_landscape), alpha = 1) +
+  geom_smooth( method = "glm", 
+               method.args = list(family = "binomial"),
+              fullrange = TRUE, color = "white", fill = "white", size = 1.5) +
+  theme_classic(base_size = 25, base_rect_size = 0) +
+  theme(legend.position = "right",
+        legend.background = element_rect(fill = "transparent"),
+        panel.background = element_rect(fill = "transparent"),
+        strip.background = element_rect(fill = "transparent"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        plot.background = element_rect(fill = "transparent", color = NA),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 16)) +
+  scale_fill_gradient(low = "skyblue", high = "red") +
+  facet_wrap(~Trait) +
+  labs(x = "Effect of DE on adaptive phenotypic plasticity",
+       y = "Probability of DE heritability",
+       fill = "Associated fitness") +
+  coord_cartesian(ylim=c(.325, 0.825)) 
+
+Fig3_post
+
+ggsave(Fig3_post,
+       units = "in", width = 12, height = 6, 
+       filename = "~/Documents/GitHub/Cross_pHox/Fig3_post.png",
+       bg = "transparent")
+
+
+
+
+
+```
+
+Create and plot a landscape of y = combined fitness effect, x = absolute DE, and z = heritability
+
+```{r}
+
+# Look at effect of total plasticity's fitness effect on binomial heritability
+biomin_fit <- filter(df_4B, Trait == "Biomineralization")
+bod_fit <- filter(df_4B, Trait == "Body size")
+
+all.fit <- data.frame(geneid = df_4B$geneid,
+                      herit_bi = biomin_fit$herit_bi,
+                      all_fit = biomin_fit$fit_landscape + 
+                        bod_fit$fit_landscape)
+
+all.fit <- head(all.fit, -(nrow(all.fit)/2))
+
+# Export all.fit for GOMWU
+write.csv(data.frame(geneid = all.fit$geneid,
+                     all_fit = all.fit$all_fit),
+          file = "GO_MWU-master/all_fit_GOMWU.csv",
+          row.names = FALSE)
+
+# Plot total fitness effect
+ggplot(data = all.fit,
+  aes(x = all_fit, y = herit_bi)) +
+  geom_smooth(method = "lm",
+              fullrange = TRUE, color = "black", fill = "gray") +
+  theme_classic(base_size = 15, base_rect_size = 0) +
+  theme(legend.position = "top") +
+  scale_fill_gradient(low = "royalblue", high = "salmon1") +
+  labs(x = "Effect of DE on adaptive phenotypic plasticity",
+       y = "Probability of DE heritability",
+       fill = "Associated fitness")
+
+# Binomial glm
+summary(glm(herit_bi ~ scale(all_fit),
+            family = binomial(link = "logit"),
+            data = all.fit))
+
+# Beta glm
+betareg(herit_bi ~ scale(all_fit),
+            family = beta(link = "logit"),
+            data = all.fit)
+
+
+# Make data fram for landscape plot
+landscape_df <- data.frame(
+  geneid = plh2_v_spi$geneid,
+  fitness = (plh2_v_spi$fit_eff * 0.40) + (plh2_v_bod$fit_eff * -0.13),
+  ad_plast = (plh2_v_spi$fit_eff) + (plh2_v_bod$fit_eff),
+  spi_eff = plh2_v_spi$fit_eff,
+  biomin_eff = plh2_v_spi$fit_eff,
+  IA = plh2_v_spi$`unlist(bind_rows(evol_pl, .id = "column_label"))`)
+
+
+
+landscape_df <- merge(landscape_df,
+                      data.frame(logFC = dev_QLFT$table$logFC,
+                                 geneid = row.names(dev_QLFT)),
+                      by = "geneid")
+
+library(akima)
+library(rayshader)
+
+akima_df <- as.data.frame(interp2xyz(interp(x=landscape_df$logFC,
+                                            y=landscape_df$IA,
+                                            z=scale(landscape_df$fitness))))
+
+g1 <- ggplot(akima_df, aes(x=x,y=y,z=z, fill=z)) + 
+    geom_contour_filled(binwidth=1.25, aes(fill = stat(nlevel),
+                                           fill = stat(nlevel))) +
+    scale_fill_gradient(low = "skyblue", high = "red") +
+    labs(fill = "Associated fitness effect", x = "DE logFC", 
+         y = expression("DE " ~ italic(h^2))) +
+    theme_classic(base_size = 20) +
+    theme(legend.text = element_text(size = 10)) +
+    theme(legend.position = "top")
+
+
+g1
+
+plot_gg(g1,multicore=TRUE,width=5,height=5,scale=500, shadow_intensity = 0.5)
+
+g1
+
+# Export Fig 5 as png
+png("~/Documents/GitHub/Cross_pHox/g1.png", units = "in", width = 7, 
+    height = 7, 
+    res = 600)
+
+g1
+
+```
+
+#Functional enrichment analyses
+
+First, wrangle GO annotation data for tests
+
+```{r}
+
+# Read in genomic ranges object of Spur5.0 gene GO terms
+BP <- readRDS("GO_annotation/bp_spurpuratus_eg_gene_go_genesets.rds")
+CC <- readRDS("GO_annotation/cc_spurpuratus_eg_gene_go_genesets.rds")
+MF <- readRDS("GO_annotation/mf_spurpuratus_eg_gene_go_genesets.rds")
+
+## Create df containing cols for geneid, BP, CC, and MF
+# Combine GO lists and export genes
+all_GOs <- c(BP, CC, MF)
+unique_genes <- unique(unlist(all_GOs))
+
+# Create an empty data frame with columns for each grouping variable
+GOannot_df <- data.frame(Gene = unique_genes, BP = "", CC = "", MF = "", stringsAsFactors = FALSE)
+
+# Iterate over the grouping variables and populate the data frame
+for (group_var in names(BP)) {
+  # Get the vector of gene names for the current grouping variable
+  gene_vector <- BP[[group_var]]
+  
+  # Set the grouping variable for genes that belong to it
+  GOannot_df$BP[GOannot_df$Gene %in% gene_vector] <- paste(GOannot_df$BP[GOannot_df$Gene %in% gene_vector], group_var, sep = ", ")
+}
+
+for (group_var in names(CC)) {
+  gene_vector <- CC[[group_var]]
+  GOannot_df$CC[GOannot_df$Gene %in% gene_vector] <- paste(GOannot_df$CC[GOannot_df$Gene %in% gene_vector], group_var, sep = ", ")
+}
+
+for (group_var in names(MF)) {
+  gene_vector <- MF[[group_var]]
+  GOannot_df$MF[GOannot_df$Gene %in% gene_vector] <- paste(GOannot_df$MF[GOannot_df$Gene %in% gene_vector], group_var, sep = ", ")
+}
+
+# Remove leading and trailing commas
+GOannot_df$BP <- gsub("^, |, $", "", GOannot_df$BP)
+GOannot_df$CC <- gsub("^, |, $", "", GOannot_df$CC)
+GOannot_df$MF <- gsub("^, |, $", "", GOannot_df$MF)
+
+# Show resulting df
+head(GOannot_df)
+
+## Merge geneID w/ transcriptIDs for use w/ RNAseq dfs
+# Read in Spur_5.0 gff3
+Spur5.0_gff <- read.gff(
+  "Genome_Resources/GCF_000002235.5_Spur_5.0_genomic.gff"
+  )
+
+Spur5.0_gff_tr <- filter(Spur5.0_gff, type == "mRNA")
+
+# Create df of transcript ID and geneID
+gene_name_index <- data.frame(
+  Gene = gsub(";.*", "",
+              gsub(".*Parent=", "", Spur5.0_gff_tr$attributes)),
+  Transcript = gsub(";.*", "",
+              gsub("ID=", "", Spur5.0_gff_tr$attributes))
+)
+
+gene_name_index$Gene <- gsub("gene-", "", gene_name_index$Gene)
+
+# How many gene names are in the GO term df? Most of them! Good start
+nrow(filter(gene_name_index, Gene %in% GOannot_df$Gene))
+
+# Format GOannot_df for GOMWU + Fisher's exact tests
+GOannot_df <- merge(GOannot_df,
+                    gene_name_index,
+                    by = "Gene")
+
+goAnnot_spur5.0 <- data.frame(
+  ID = GOannot_df$Transcript,
+  GO = paste(gsub(",", ";", GOannot_df$BP),
+             gsub(",", ";", GOannot_df$CC),
+             gsub(",", ";", GOannot_df$MF),
+             sep = ";"))
+
+# Clean up GO term list
+goAnnot_spur5.0$GO <- gsub(";;", ";", goAnnot_spur5.0$GO)
+
+remove_1st_semi <- function(text_vector) {
+  modified_text_vector <- vector(length = length(text_vector))
+  
+  for (i in 1:length(text_vector)) {
+    if (substr(text_vector[i], 1, 1) == ";") {
+      modified_text_vector[i] <- substr(text_vector[i], 2, nchar(text_vector[i]))
+    } else {
+      modified_text_vector[i] <- text_vector[i]
+    }
+  }
+  
+  return(modified_text_vector)
+}
+
+remove_last_semi <- function(text_vector) {
+  modified_text_vector <- vector(length = length(text_vector))
+  
+  for (i in 1:length(text_vector)) {
+    if (substr(text_vector[i], nchar(text_vector[i]), nchar(text_vector[i])) == ";") {
+      modified_text_vector[i] <- substr(text_vector[i], 1, nchar(text_vector[i]) - 1)
+    } else {
+      modified_text_vector[i] <- text_vector[i]
+    }
+  }
+  
+  return(modified_text_vector)
+}
+
+# Apply function to remove first semicolons from GO term list
+goAnnot_spur5.0$GO <- gsub(" ", "", remove_last_semi(remove_1st_semi(goAnnot_spur5.0$GO)))
+
+# Export to GOMWU directory
+write.table(goAnnot_spur5.0, 
+            "GO_MWU-master/goAnnot_spur5.0.tab",
+            quote = FALSE,
+            sep = '\t',
+            col.names = FALSE,
+            row.names = FALSE)
+
+goAnnot_spur5.0
+
+```
+
+Next, perform analyses
+
+```{r}
+
+# Create DE -log pvalue + logFC GOMWU inputs
+
+write.csv(
+  data.frame(geneid = row.names(dev_QLFT$table),
+             neg_log_p = -log(dev_QLFT$table$PValue)),
+  row.names = FALSE,
+  "GO_MWU-master/dev_logFC.csv")
+
+write.csv(
+  data.frame(geneid = row.names(dev_QLFT$table),
+             logFC = (dev_QLFT$table$logFC)),
+  row.names = FALSE,
+  "GO_MWU-master/dev_logFC.csv")
+
+write.csv(
+  data.frame(geneid = row.names(parental_QLFT$table),
+             logFC = parental_QLFT$table$logFC),
+  row.names = FALSE,
+  "GO_MWU-master/parental_logFC.csv")
+
+# Create fitness effect for GOMWU
+write.csv(
+  data.frame(geneid = ind_dfb$geneid,
+             eff = ind_dfb$fit_eff),
+  row.names = FALSE,
+  "GO_MWU-master/bod_GOMWU_eff.csv")
+
+write.csv(
+  data.frame(geneid = plh2_v_bod$geneid,
+             eff_IA = plh2_v_bod$fit_eff * plh2_v_bod$`unlist(bind_rows(evol_pl, .id = "column_label"))`),
+  row.names = FALSE,
+  "GO_MWU-master/bod_IA_GOMWU_eff.csv")
+
+write.csv(
+  data.frame(geneid = plh2_v_spi$geneid,
+             eff_IA = plh2_v_spi$fit_eff * plh2_v_spi$`unlist(bind_rows(evol_pl, .id = "column_label"))`),
+  row.names = FALSE,
+  "GO_MWU-master/spi_IA_GOMWU_eff.csv")
+
+write.csv(
+  data.frame(geneid = ind_dfm$geneid,
+             eff = ifelse(ind_dfm$Dir == "Adaptive", 
+                          abs(ind_dfm$fit_eff)^2,
+                          (abs(ind_dfm$fit_eff)^2)*-1)),
+  row.names = FALSE,
+  "GO_MWU-master/spi_fit_GOMWU_eff.csv")
+
+# abs(logFC) x fitness effect
+write.csv(
+  data.frame(geneid = ind_dfm$geneid,
+             eff_logFC = abs(ind_dfm$logFC) * ifelse(ind_dfm$Dir == "Adaptive", 
+                          abs(ind_dfm$fit_eff)^2,
+                          (abs(ind_dfm$fit_eff)^2)*-1)),
+  row.names = FALSE,
+  "GO_MWU-master/spi_fit_logFC_GOMWU_eff.csv")
+
+# abs(logFC) x fitness effect x IA
+write.csv(
+  data.frame(geneid = plh2_v_spi$geneid,
+             logFC_eff_IA = abs(plh2_v_spi$logFC) * 
+               plh2_v_spi$fit_eff * 
+               plh2_v_spi$`unlist(bind_rows(evol_pl, .id = "column_label"))`),
+  row.names = FALSE,
+  "GO_MWU-master/spi_logFC_eff_IA_GOMWU.csv")
+
+write.csv(
+  data.frame(geneid = plh2_v_spi$geneid,
+             logFC_eff_IA = abs(plh2_v_spi$logFC) * 
+               plh2_v_spi$fit_eff * 
+               plh2_v_spi$`unlist(bind_rows(evol_pl, .id = "column_label"))`),
+  row.names = FALSE,
+  "GO_MWU-master/spi_logFC_eff_IA_GOMWU.csv")
+
+# Relative contribution to biomin vs. body size x IA
+rel_df <- merge(
+  data.frame(geneid = plh2_v_spi$geneid,
+             spi_eff = plh2_v_spi$fit_eff,
+             logFC = plh2_v_spi$logFC,
+             IA = plh2_v_spi$IA),
+  data.frame(geneid = plh2_v_bod$geneid,
+             bod_eff = plh2_v_bod$fit_eff),
+  by = "geneid")
+
+rel_df$rel_eff <- rel_df$spi_eff - rel_df$bod_eff
+rel_df$rel_IA <- rel_df$rel_eff * rel_df$IA
+rel_df$rel_logFC_IA <- rel_df$rel_IA * abs(rel_df$logFC)
+
+rel_df$bod_IA <- rel_df$bod_eff * rel_df$IA
+
+rel_df$spi_IA <- (-1*rel_df$spi_eff) * rel_df$IA
+
+write.csv(
+  data.frame(geneid = rel_df$geneid,
+             rel_IA = rel_df$rel_IA),
+  row.names = FALSE,
+  "GO_MWU-master/rel_IA_GOMWU.csv")
+
+write.csv(
+  data.frame(geneid = rel_df$geneid,
+             rel_bod = rel_df$bod_eff),
+  row.names = FALSE,
+  "GO_MWU-master/rel_bod_GOMWU.csv")
+
+write.csv(
+  data.frame(geneid = rel_df$geneid,
+             rel_logFC_IA = rel_df$rel_logFC_IA),
+  row.names = FALSE,
+  "GO_MWU-master/rel_logFC_IA_GOMWU.csv")
+
+write.csv(
+  data.frame(geneid = rel_df$geneid,
+             bod_IA = rel_df$bod_IA),
+  row.names = FALSE,
+  "GO_MWU-master/bod_IA_GOMWU.csv")
+
+write.csv(
+  data.frame(geneid = rel_df$geneid,
+             bod_IA = rel_df$spi_IA),
+  row.names = FALSE,
+  "GO_MWU-master/spi_IA_GOMWU.csv")
+
+ggplot(data = rel_df,
+       aes(x = spi_eff, y = bod_eff)) +
+  geom_point() +
+  geom_smooth()
+
+```
+
+How many transcripts are isoforms of the same gene, and which?
+
+```{r}
+
+s5_gff <- read.gff("Genome_Resources/GCF_000002235.5_Spur_5.0_genomic.gff")
+
+s5_gff_gene_mRNA <- filter(s5_gff, type == "gene" | type == "mRNA")
+
+table(s5_gff_gene_mRNA$type)
+
+s5_gff_mRNA <- filter(s5_gff, type == "mRNA")
+
+s5_gff_mRNA$Parent <- str_extract(s5_gff_mRNA$attributes, "(?<=Parent=)[^;]+")
+s5_gff_mRNA$Transcript <- str_extract(s5_gff_mRNA$attributes, "(?<=ID=)[^;]+")
+
+multiple_transcripts_df <- s5_gff_mRNA %>%
+  group_by(Parent) %>%
+  filter(n() > 1) %>% 
+  ungroup()
+
+dev_QLFT$table$transcript <- row.names(dev_QLFT$table)
+parental_QLFT$table$transcript <- row.names(parental_QLFT$table)
+
+nrow(filter(dev_QLFT$table, transcript %in% multiple_transcripts_df$Transcript & FDR < 0.05))/nrow(dev_QLFT$table) # 2.3 %
+
+nrow(filter(parental_QLFT$table, transcript %in% multiple_transcripts_df$Transcript & FDR < 0.05))/nrow(parental_QLFT$table) # 1.3 %
+
+nrow(filter(sig_dev_meth_dfdm_ad, column_label %in% multiple_transcripts_df$Transcript)) # 0 in sig, adaptive biomineralization genes
+
+nrow(filter(sig_dev_meth_dfdb_ad, column_label %in% multiple_transcripts_df$Transcript)) # 0 in sig, adaptive biomineralization genes
+
+5/nrow(sig_dev_meth_dfdm_ad) # 4.0 % of hits are transcript isoforms of one another 
+
+21/nrow(sig_dev_meth_dfdb_ad) # 3.7 % of hits are transcript isoforms of one another 
+
+
+spi_ad_df <- sig_dev_meth_dfdm_ad
+spi_ad_df$Transcript <- bod_ad_df$column_label
+
+spi_ad_df <- merge(spi_ad_df,
+                   s5_gff_mRNA,
+                   by = "Transcript")
+
+spi_shared_transcripts <- spi_ad_df %>%
+  group_by(Parent) %>%
+  filter(n() > 1) %>%
+  ungroup()
+
+bod_ad_df <- sig_dev_meth_dfdb_ad
+bod_ad_df$Transcript <- bod_ad_df$column_label
+
+bod_ad_df <- merge(bod_ad_df,
+                   s5_gff_mRNA,
+                   by = "Transcript")
+
+bod_shared_transcripts <- bod_ad_df %>%
+  group_by(Parent) %>%
+  filter(n() > 1) %>%
+  ungroup()
+
+
+```
+
+
+```{r}
+
+# GO enrichments using Mann Whitney U tests
+setwd("~/Documents/GitHub/Cross_pHox/GO_MWU-master/")
+
+#Now we multiply them together into a new column
+
+## Ok we also want to bring in our annotations
+#I would suggest putting a GO_MWU folder into your working directory for these steps. There is some stuff to download such as the obo files 
+#See https://github.com/z0on/GO_MWU
+
+# GO_MWU uses continuous measure of significance (such as fold-change or -log(p-value) ) to identify GO categories that are significantly enriches with either up- or down-regulated genes. The advantage - no need to impose arbitrary significance cutoff.
+# If the measure is binary (0 or 1) the script will perform a typical "GO enrichment" analysis based Fisher's exact test: it will show GO categories over-represented among the genes that have 1 as their measure. 
+# On the plot, different fonts are used to indicate significance and color indicates enrichment with either up (red) or down (blue) regulated genes. No colors are shown for binary measure analysis.
+# The tree on the plot is hierarchical clustering of GO categories based on shared genes. Categories with no branch length between them are subsets of each other.
+# The fraction next to GO category name indicates the fracton of "good" genes in it; "good" genes being the ones exceeding the arbitrary absValue cutoff (option in gomwuPlot). For Fisher's based test, specify absValue=0.5. This value does not affect statistics and is used for plotting only.
+# Stretch the plot manually to match tree to text
+
+# Mikhail V. Matz, UT Austin, February 2015; matz@utexas.edu
+
+################################################################
+# First, press command-D on mac or ctrl-shift-H in Rstudio and navigate to the directory containing scripts and input files. Then edit, mark and execute the following bits of code, one after another.
+
+# Edit these to match your data file names: 
+input="parental_logFC.csv" # two columns of comma-separated values: gene id, continuous measure of significance. To perform standard GO enrichment analysis based on Fisher's exact test, use binary measure (0 or 1, i.e., either sgnificant or not).
+goAnnotations="goAnnot_spur5.0.tab" # two-column, tab-delimited, one line per gene, multiple GO terms separated by semicolon. If you have multiple lines per gene, use nrify_GOtable.pl prior to running this script.
+goDatabase="go.obo" # download from http://www.geneontology.org/GO.downloads.ontology.shtml
+goDivision="CC" # either MF, or BP, or CC
+source("gomwu.functions.R")
+
+# Calculating stats. It might take ~3 min for MF and BP. Do not rerun it if you just want to replot the data with different cutoffs, go straight to gomwuPlot. If you change any of the numeric values below, delete the files that were generated in previos runs first.
+gomwuStats(input, goDatabase, goAnnotations, goDivision,
+	perlPath="perl", # replace with full path to perl executable if it is not in your system's PATH already
+	largest=0.1, # a GO category will not be considered if it contains more than this fraction of the total number of genes
+	smallest=35,   # a GO category should contain at least this many genes to be considered
+	clusterCutHeight=0.25) # threshold for merging similar (gene-sharing) terms. See README for details.
+	#Alternative="g") # # threshold for merging similar (gene-sharing) terms. See README for details.
+           #	Alternative="g" # by default the MWU test is two-tailed; specify "g" or "l" of you want to test for "greater" or "less" instead. 
+           #	Module=TRUE,Alternative="g" # un-remark this if you are analyzing a SIGNED WGCNA module (values: 0 for not in module genes, kME for in-module genes). In the call to gomwuPlot below, specify absValue=0.001 (count number of "good genes" that fall into the module)
+           #	Module=TRUE # un-remark this if you are analyzing an UNSIGNED WGCNA module
+# do not continue if the printout shows that no GO terms pass 10% FDR.
+
+quartz(quartz.options(width = 5, height = 4))
+
+results=gomwuPlot(input, goAnnotations, goDivision,
+#	absValue=-log(0.05,10),  # genes with the measure value exceeding this will be counted as "good genes". Specify absValue=0.001 if you are doing Fisher's exact test for standard GO enrichment or analyzing a WGCNA module (all non-zero genes = "good genes").
+	absValue=.0001,
+	level1=0.05, # FDR threshold for plotting. Specify level1=1 to plot all GO categories containing genes exceeding the absValue.
+	level2=0.01, # FDR cutoff to print in regular (not italic) font.
+	level3=0.001, # FDR cutoff to print in large bold font.
+	txtsize=1,    # decrease to fit more on one page, or increase (after rescaling the plot so the tree fits the text) for better "word cloud" effect
+	treeHeight=1,# height of the hierarchical clustering tree
+  colors=c("salmon1","royalblue","lightcoral","skyblue") # these are default colors, un-remar and change if needed
+)
+
+
+
+# manually rescale the plot so the tree matches the text 
+# if there are too many categories displayed, try make it more stringent with level1=0.05,level2=0.01,level3=0.001.  
+
+
+```
+
+
+
+```{r}
+# Search for p53 TF in dev DEG's
+peek <- dev_QLFT$table
+peek$geneid <- row.names(peek)
+
+# Find geneids of ribotoxicity response transcripts
+goAnnot <- read.table("GO_MWU-master/goAnnot_spur5.0.tab")
+dev_QLFT_cutoff_df$geneid <- row.names(dev_QLFT_cutoff)
+
+colnames(goAnnot) <- c("geneid", "GO_terms")
+
+dev_QLFT_cutoff_df <- merge(dev_QLFT_cutoff_df,
+                         goAnnot,
+                         by = "geneid")
+
+## Maladaptive ribosomal GO terms
+# RNA dependent ATPase = 
+# LOC581723/UPF1 (responsive to oxidative stress)
+
+```
+
+
+
+```{r}
+
+# Try functional enrichment with topGO
+library(topGO)
+bg_genes <- row.names(dev_QLFT$table)
+ 
+# Read in genes of interest
+candidate_list <- row.names(dev_QLFT_cutoff$table)
+
+
+```
+
+#Boneyard
+
+Selection gradient model rather than structural eq. model for performance effect
+
+```{r}
+
+## Fit selection gradient models
+
+ab_lmm_df <- filter(tab_exp_df, geneid %in% tab_dev_filt$geneid)
+ab_lmm_df$Sibship <- gsub("_.*", "", ab_lmm_df$variable)
+
+# Fit selection gradient models
+ab_lms <- dlply(ab_lmm_df, c("geneid"), function(df) 
+lm(PercAb ~ Par + Dev + value + abs(Sib_FC), data = df))
+
+ab_lm_coefs <- list() 
+
+# Extract plasticity's fitness effects and p-values
+for (i in 1:length(ab_lms)) {
+ ab_lm_coefs[[i]] <- as.data.frame(ab_lms[[i]]$coefficients)[5,1]
+}
+names(ab_lm_coefs) <- names(ab_lms)
+
+ab_lm_pvals <- list() 
+
+# Report significant effects
+for (i in 1:length(ab_lms)) {
+ ab_lm_pvals[[i]] <- as.data.frame(anova(ab_lms[[i]]))[4,5]
+}
+names(ab_lm_pvals) <- names(ab_lms)
+
+ab_lm_coefs_df <- as.data.frame(unlist(bind_rows(ab_lm_coefs, 
+                                                 .id = "variable")))
+ab_lm_coefs_df$variable <- row.names(ab_lm_coefs_df)
+
+ab_lm_pvals_df <- as.data.frame(unlist(bind_rows(ab_lm_pvals, 
+                                                 .id = "variable")))
+ab_lm_pvals_df$variable <- row.names(ab_lm_pvals_df)
+
+ab_lm_df <- merge(ab_lm_coefs_df, ab_lm_pvals_df, by = "variable")
+
+ab_lm_df$FDR <- p.adjust(ab_lm_df$`unlist(bind_rows(ab_lm_pvals, .id = "variable"))`,
+                         method = "fdr")
+
+# How many significant fittnes effects? 9% of DEGs
+nrow(filter(ab_lm_df, FDR < 0.05))/nrow(ab_lm_df)
+
+## Plot absolute DE by fitness effect
+# Create plotting df
+selg_ab_pl_df <- merge(data.frame(geneid = row.names(dev_QLFT_cutoff_df),
+                                       logFC = dev_QLFT_cutoff_df$logFC),
+                       data.frame(geneid = ab_lm_df$variable,
+                                  Abnorm_eff = ab_lm_df$`unlist(bind_rows(ab_lm_coefs, .id = "variable"))`,
+                                  FDR = ab_lm_df$FDR),
+                       
+                       by = "geneid")
+
+selg_ab_pl_df$Dir <- ifelse(selg_ab_pl_df$Abnorm_eff < 0, "Adaptive", "Maladaptive")
+
+# Plot
+ggplot(data = filter(selg_ab_pl_df),
+       aes(y = abs(logFC), x = Abnorm_eff)) +
+  geom_point(aes(color = Dir), size = 0.25, alpha = 1) +
+  geom_smooth(method = "lm", formula = y ~ poly(x,2), 
+              alpha = 0.25, color = "black") +
+  theme_classic() +
+  scale_color_manual(values = c("royalblue1", "salmon1")) +
+  labs(title = "DE's maladaptive effects were stronger than adaptive effects",
+       subtitle = "All points represent DEGs",
+       y = "Absolute logFC",
+       x = "Fitness effect (abnormality)",
+       color = "Effect")
+
+
+```
+
+```{r}
+
+# Get GO annotations from biomart
+library(biomaRt) 
+
+biomart_dfs <- data.frame(biomaRt::listDatasets(biomaRt::useMart("metazoa_mart",host = "https://www.ensembl.org")), 10) 
+
+listMarts
+
+
+head(biomaRt::listAttributes(biomaRt::useDataset(
+                                         dataset = "spurpuratus_gene_ensembl",         
+                                         mart    = useMart("ENSEMBL_MART_ENSEMBL",      
+                                         host    = "https://www.ensembl.org"))), 10)
+
+biomartr::organismBM(organism = "Strongylocentrotus purpuratus")
+
+GO_tbl <- biomartr::getGO(organism = "Strongylocentrotus purpuratus", 
+                          genes = "name_1006",
+                          filter = "with_ensembl_metazoa_transcript")
+
+biomartr::organismFilters("Strongylocentrotus purpuratus")
+
+biomartr::organismAttributes("Strongylocentrotus purpuratus")
+
+GO_tbl <- biomartr::getGO(organism = "Strongylocentrotus purpuratus", 
+                          genes = "spurpuratus_eg_gene",
+                          filters = "ensembl_transcript_id")
+
+spur_att <- biomartr::organismAttributes("Strongylocentrotus purpuratus")
+
+```
+
+For supplement, plot a pedigree graph
+
+```{r}
+
+library(visPedigree)
+
+tidy_ped_N <- tidyped(pedi[grep("^N", pedi$ID), ])
+tidy_ped_U <- tidyped(pedi[grep("^U", pedi$ID), ])
+
+N_ped_plot <- visped(
+  tidy_ped_N, 
+  compact = TRUE)
+
+U_ped_plot <- visped(
+  tidy_ped_U, 
+  compact = TRUE)
+
+png("~/Documents/GitHub/Cross_pHox/N_ped_plot.png", units = "in", width = 12, 
+    height = 6, 
+    res = 600)
+
+visped(
+  tidy_ped_N, 
+  compact = TRUE)
+
+png("~/Documents/GitHub/Cross_pHox/U_ped_plot.png", units = "in", width = 12, 
+    height = 6, 
+    res = 600)
+
+visped(
+  tidy_ped_U, 
+  compact = TRUE)
+
+
+```
+

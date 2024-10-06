@@ -1,0 +1,16 @@
+#!/bin/bash
+#SBATCH --job-name=hisat2_index
+#SBATCH --ntasks=1 #Number of tasks (processes) to be launched
+#SBATCH --cpus-per-task=4 #Number of CPUs per task
+#SBATCH --mem=16G # Memory allocation
+#SBATCH -t 24:00:00
+#SBATCH --mail-type=START,END,FAIL
+#SBATCH --mail-user=snbogan@ucsb.edu
+    
+#Set wd
+cd /home/snbogan/Cross_pHox/Genome
+
+hisat2-build -p 16 /home/snbogan/Cross_pHox/Genome/GCF_000002235.5_Spur_5.0_genomic.fna \
+ /home/snbogan/Cross_pHox/Genome/hisat2_index
+
+

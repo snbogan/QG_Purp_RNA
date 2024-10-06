@@ -1,0 +1,46 @@
+#!/bin/bash
+#SBATCH --job-name=trimmomatic_cutadapt_RNA_raw
+#SBATCH --ntasks=1 #Number of tasks (processes) to be launched
+#SBATCH --cpus-per-task=16 #Number of CPUs per task
+#SBATCH --mem=64G # Memory allocation
+#SBATCH -t 72:00:00
+#SBATCH --mail-type=START,END,FAIL
+#SBATCH --mail-user=snbogan@ucsb.edu
+
+# Define variables
+reference_genome="/home/snbogan/Cross_pHox/Genome/hisat2_index/Spur5.0"
+input_dir="/home/snbogan/Cross_pHox/CutAdapt_fastqs/to_align"
+output_dir="/home/snbogan/Cross_pHox/hisat2_alignments"
+
+# Create the output directory if it doesn't exist
+mkdir -p "$output_dir"
+
+# Get a list of input files
+input_files=("$input_dir"/*R1_trimmed.fastq.gz_paired.fastq.gz)
+
+# Align paired-end libraries using HISAT2
+for input_file in "${input_files[@]}"; do
+  sample_name=$(basename "$input_file" _trimmed.fastq.gz_paired.fastq.gz)
+  
+  hisat2 -x "$reference_genome" \
+    -U "$input_file" \
+    --summary-file "$output_dir/${sample_name}.align_summary.txt" \
+    --threads $SLURM_CPUS_PER_TASK \
+    -S "$output_dir/${sample_name}.sam" \
+    2> "$output_dir/${sample_name}.log"
+  
+  # Convert SAM file to BAM and sort
+  samtools view -@ $SLURM_CPUS_PER_TASK -b -o "$output_dir/${sample_name}.bam" "$output_dir/${sample_name}.sam"
+  samtools sort -@ $SLURM_CPUS_PER_TASK -o "$output_dir/${sample_name}.sorted.bam" "$output_dir/${sample_name}.bam"
+  samtools index "$output_dir/${sample_name}.sorted.bam"
+  
+  # Clean up intermediate files (SAM and unsorted BAM)
+  rm "$output_dir/${sample_name}.sam" "$output_dir/${sample_name}.bam"
+done
+
+echo "Alignment completed."
+
+
+
+
+

@@ -1,0 +1,69 @@
+#!/bin/bash
+#SBATCH --job-name=trimmomatic_cutadapt_RNA_rem
+#SBATCH --ntasks=1 #Number of tasks (processes) to be launched
+#SBATCH --cpus-per-task=16 #Number of CPUs per task
+#SBATCH --mem=64G # Memory allocation
+#SBATCH -t 60:00:00
+#SBATCH --mail-type=START,END,FAIL
+#SBATCH --mail-user=snbogan@ucsb.edu
+
+#Set wd
+cd /home/snbogan/Cross_pHox/
+
+#Run cutadapt
+
+input_dir2="/home/snbogan/Cross_pHox/raw_fastq/cutadapt_rem"
+output_dir2="/home/snbogan/Cross_pHox/CutAdapt_fastqs"
+
+# Define universal Illumina adapter sequences
+adapter_r1="AGATCGGAAGAGCACACGTCTGAACTCCAGTCA"
+adapter_r2="AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT"
+
+# Loop through input files in the directory
+for input_file in "$input_dir2"/*R1_001.fastq.gz; do
+    # Extract the base filename
+    filename=$(basename "$input_file")
+    # Construct the corresponding R2 filename
+    input_r2="${input_file/_R1/_R2}"
+    # Construct the output filenames
+    output_r1="$output_dir2/${filename/R1_001.fastq.gz/R1_trimmed.fastq.gz}"
+    output_r2="$output_dir2/${filename/R1_001.fastq.gz/R2_trimmed.fastq.gz}"
+
+    # Run Cutadapt to trim adapters
+    cutadapt -a $adapter_r1 -A $adapter_r2 -o $output_r1 -p $output_r2 $input_file $input_r2
+
+    # Print completion message
+    echo "Adapter trimming complete for $filename"
+done
+
+INPUT_DIR=/home/snbogan/Cross_pHox/CutAdapt_fastqs
+OUTPUT_DIR=/home/snbogan/Cross_pHox/CutAdapt_fastqs
+ADAPTERS=/home/snbogan/Cross_pHox/TruSeq-3.fa
+
+#Define input files
+FILES=($(ls -1 ${INPUT_DIR}/*_trimmed.fastq.gz))
+NUM_FILES=${#FILES[@]}
+NUM_JOBS=$(expr ${NUM_FILES} / 2)
+
+#Run Trimmomatic in parallel (2 samples at a time)
+parallel --jobs ${NUM_JOBS} \
+    'trimmomatic PE -phred33 \
+    ${INPUT_DIR}/{} ${INPUT_DIR}/{} \
+    ${OUTPUT_DIR}/{}_paired.fastq.gz ${OUTPUT_DIR}/{}_unpaired.fastq.gz \
+    ${OUTPUT_DIR}/{}_paired.fastq.gz ${OUTPUT_DIR}/{}_unpaired.fastq.gz \
+    ILLUMINACLIP:${ADAPTERS}:2:30:10:8:true \
+    LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:36 HEADCROP:10' ::: ${FILES[@]}
+
+echo "Done."
+
+#Run fastQC
+#Set wd
+cd /home/snbogan/Cross_pHox/CutAdapt_fastqs
+  
+##Run fastqc 
+fastqc *_paired.fastq.gz -o fastQC_trimmed
+
+
+
+
+
